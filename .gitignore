@@ -1,0 +1,20 @@
+# Virtuelle Umgebung
+.venv/
+
+# YOLO Trainings-Ergebnisse (wird oft sehr groß)
+runs/
+
+# Deine Datensätze (falls sie lokal in diesen Ordnern liegen)
+datasets/
+hailo_calibration/
+sorted_dataset/
+train_yolo_output/
+
+# Große Model-Dateien (auch in Unterordnern)
+*.pt
+*.onnx
+*.engine
+
+# Temporäre Dateien
+__pycache__/
+.ipynb_checkpoints/

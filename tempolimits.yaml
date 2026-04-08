@@ -1,0 +1,50 @@
+# ===============================================================
+# Anleitung: YOLO Konfigurations-Datei (tempolimits.yaml)
+# ===============================================================
+#
+# Wozu ist diese Datei da?
+# Das ist die "Landkarte" für das Training. Sie sagt YOLO,
+# wo es die Bilder findet und was die Klassen (Schilder) bedeuten.
+#
+# ===============================================================
+
+# WICHTIG: Pfad zu den Bildern (ABSOLUTER Pfad, mit '/' statt '\')
+path: D:/Entwicklungsprojekt/Software/sorted_dataset #<-- ANPASSEN!
+
+# Diese Pfade sind relativ zum 'path' oben
+train: images/train
+val: images/val
+#test: images/test
+
+# Klassennamen
+names:
+  # --- Klassische Tempolimits (Rund, Rot) ---
+  0: Tempolimit_20
+  1: Tempolimit_30
+  2: Tempolimit_40
+  3: Tempolimit_50
+  4: Tempolimit_60
+  5: Tempolimit_70
+  6: Tempolimit_80
+  7: Tempolimit_90   # Nicht vorhanden, aber für die Zukunft reserviert
+  8: Tempolimit_100
+  9: Tempolimit_110  # Nicht vorhanden, aber für die Zukunft reserviert
+  10: Tempolimit_120
+  11: Tempolimit_130 # Nicht vorhanden, aber für die Zukunft reserviert
+
+  # --- Implizite Tempolimits ---
+  12: Spielstrasse          # Bedeutet: Schritttempo
+  13: Ende_Spielstrasse     # Bedeutet: Wieder 30 oder 50
+  14: Ortsschild            # Bedeutet: 50 km/h (!)
+  15: Ende_Ortsschild       # Bedeutet: 100 km/h (!)
+  
+  # --- Aufhebungen ---
+  16: Aufhebeschild         # Weiß mit Strichen, leer
+  17: Aufhebeschild_Zahl    # Graue Zahl durchgestrichen (egal Welche)
+  
+  # --- Autobahn Kontext ---
+  18: Autobahn 
+  19: Ende_Autobahn
+
+ 
+ 
