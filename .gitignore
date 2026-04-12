@@ -4,11 +4,12 @@
 # YOLO Trainings-Ergebnisse (wird oft sehr groß)
 runs/
 
-# Deine Datensätze (falls sie lokal in diesen Ordnern liegen)
-datasets/
+# Deine Datensätze: Alles in datasets/ ignorieren...
+datasets/*
+# ... außer dem Ordner mit den Bildern für die Anwendung
+!datasets/application_images_dataset/
+
 hailo_calibration/
-sorted_dataset/
-train_yolo_output/
 
 # Große Model-Dateien (auch in Unterordnern)
 *.pt

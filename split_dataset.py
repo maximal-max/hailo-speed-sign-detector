@@ -27,8 +27,8 @@ from tqdm import tqdm
 # -----------------------------
 # CONFIG
 # -----------------------------
-SOURCE_DIR = Path("datasets/Tempo-Dataset_ohne_kleine_klassen")    
-TARGET_DIR = Path("sorted_dataset")          
+SOURCE_DIR = Path("datasets/stable_tempo_dataset")    
+TARGET_DIR = Path("datasets/sorted_dataset")          
 
 IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".bmp", ".webp"] 
 LABEL_EXT = ".txt"

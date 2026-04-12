@@ -9,7 +9,7 @@
 # ===============================================================
 
 # WICHTIG: Pfad zu den Bildern (ABSOLUTER Pfad, mit '/' statt '\')
-path: D:/Entwicklungsprojekt/Software/sorted_dataset #<-- ANPASSEN!
+path: D:/Entwicklungsprojekt/hailo-speed-sign-detector/datasets/sorted_dataset #<-- ANPASSEN!
 
 # Diese Pfade sind relativ zum 'path' oben
 train: images/train

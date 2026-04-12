@@ -1,8 +1,45 @@
 """
-================================================================
-Skript zur Generierung von Kalibrierungsbildern für Hailo
-================================================================
+==============================================================================
+Hailo Kalibrierungsset-Generator
+==============================================================================
 
+ZWECK:
+  Erstellt Kalibrierungsbilder für den Hailo DFC (Data Flow Compiler), der
+  das trainierte FP32-ONNX-Modell auf INT8 quantisiert. Pro gewünschter
+  Modellgröße (z.B. 512, 640, 800 px) entsteht ein separater Ordner mit:
+    • images/   → 1024 JPG-Dateien für den Hailo Cloud Compiler (Ordner-Upload)
+    • calib_set.npy → dasselbe Set als numpy-Array für den lokalen DFC
+
+WARUM EIN EIGENES SKRIPT?
+  Das Training (train_yolo.py) erzeugt das ONNX-Modell. Die Kalibrierung ist
+  ein davon getrennter Schritt, weil:
+    • Verschiedene Modellgrößen (512/640/800 px) brauchen jeweils eigene Sets.
+    • Das Set muss nur einmal erstellt werden — nicht bei jedem Training neu.
+    • Der Cloud Compiler und der lokale DFC erwarten unterschiedliche Formate
+      (JPG-Ordner vs. .npy), beide werden hier erzeugt.
+
+VORVERARBEITUNG: NUR LETTERBOX — KEIN RAUSCHEN, KEINE AUGMENTIERUNG
+  Die Kalibrierungsbilder müssen so aussehen wie das, was die Kamera auf dem
+  Pi tatsächlich liefert. Augmentierter Motion-Blur oder Rauschen würden
+  die Aktivierungsverteilungen verzerren und die INT8-Quantisierung
+  verschlechtern. Deshalb: nur Letterbox-Resize (LongestMaxSize + PadIfNeeded,
+  grauer Rand Wert 114) — identisch zur preprocess()-Funktion in
+  RPI_application.py.
+
+FARBREIHENFOLGE:
+  • JPGs werden mit cv2.imwrite in BGR gespeichert (OpenCV-Standard, korrekt).
+  • Das .npy-Array wird in RGB gespeichert, da der Hailo DFC bei .npy-Input
+    RGB erwartet (entspricht dem RGB-Tensor, den preprocess() an den Chip gibt).
+
+VERWENDUNG:
+  1. YAML_FILE auf deine tempolimits.yaml zeigen lassen.
+  2. RESOLUTIONS auf die gewünschten Modellgrößen setzen.
+  3. NUM_IMAGES auf 1024 (Standard) oder weniger zum Testen.
+  4. Skript ausführen — Ausgabe landet in OUTPUT_ROOT.
+  5. Für Cloud Compiler: images/-Ordner hochladen.
+     Für lokalen DFC:    calib_set.npy übergeben.
+
+==============================================================================
 """
 
 import cv2
@@ -14,208 +51,218 @@ from pathlib import Path
 from tqdm import tqdm
 import albumentations as A
 
-# ===============================
-# 🔧 EINSTELLUNGEN (Flexibel)
-# ===============================
 
-# Deine Config-Datei (für die Bildpfade)
+# ==============================================================================
+# KONFIGURATION
+# ==============================================================================
+
+# Zentrale Konfigurations-Datei (Klassen + Datenpfade)
 YAML_FILE = "tempolimits.yaml"
 
-# Die gewünschten Auflösungen
+# Modellgrößen für die Kalibrierung.
+# Jede Größe entspricht einem trainierten Modell (z.B. 640px.hef).
+# Nur die Größen eintragen, für die du auch ein .hef kompilieren willst.
 RESOLUTIONS = [512, 640, 800]
 
-# Anzahl der Kalibrierungsbilder (Flexibel einstellbar)
-# Setze dies auf 1024 für das finale "High-End" Set, oder 100 zum Testen.
+# Anzahl der Kalibrierungsbilder pro Auflösung.
+# 1024 ist der empfohlene Wert für den Hailo DFC.
+# Zum Testen reichen 64–128.
 NUM_IMAGES = 1024
 
-# Haupt-Ausgabeverzeichnis
+# Ausgabe-Wurzelverzeichnis (wird bei jedem Lauf komplett neu erstellt)
 OUTPUT_ROOT = Path("hailo_calibration")
 
-# Seed für exakte Reproduzierbarkeit
+# Seed für vollständige Reproduzierbarkeit
 SEED = 42
 
-# --- AUGMENTATION SETTINGS (1:1 aus deinem Training) ---
-# Simuliert 130 km/h Motion Blur & Rolling Shutter
-AUG_BLUR_LIMIT = (13, 21)   
-AUG_BLUR_PROB  = 0.6
-AUG_SHEAR_Y    = (-4, 4)    
-AUG_SHEAR_X    = (-3, 3)
-AUG_ROTATION   = (-4, 4)
-AUG_GEOM_PROB  = 0.6
-AUG_NOISE_VAR  = (40, 150)
-AUG_NOISE_PROB = 0.6
 
-# ===============================
-# 🛠️ HELFER FUNKTIONEN
-# ===============================
+# ==============================================================================
+# HILFSFUNKTIONEN
+# ==============================================================================
 
-def load_config():
-    if not Path(YAML_FILE).exists():
-        print(f"❌ FEHLER: '{YAML_FILE}' nicht gefunden!")
+def load_config() -> dict:
+    """Lädt die zentrale YAML-Konfiguration."""
+    yaml_path = Path(YAML_FILE)
+    if not yaml_path.exists():
+        print(f"❌ FEHLER: '{YAML_FILE}' nicht gefunden in {Path.cwd()}")
         exit(1)
-    with open(YAML_FILE, 'r') as f:
+    with open(yaml_path, 'r') as f:
         return yaml.safe_load(f)
 
-def resolve_path(config):
-    """Findet den Pfad zu den Trainingsbildern basierend auf der YAML."""
-    root_path = Path(config.get('path', ''))
-    train_path = config.get('train', '')
-    
+
+def resolve_train_path(config: dict) -> Path | None:
+    """
+    Ermittelt den absoluten Pfad zum train-Bildordner aus der YAML.
+    Probiert mehrere Kandidaten durch um sowohl absolute als auch
+    relative Pfade zu unterstützen — identisch zu resolve_source_path()
+    in train_yolo.py.
+    """
+    root_str  = config.get('path', '')
+    train_str = config.get('train', '')
+
+    if not train_str:
+        return None
+
     candidates = [
-        Path(train_path),
-        root_path / train_path,
-        Path.cwd() / train_path,
-        Path.cwd() / root_path / train_path
+        Path(train_str),
+        Path(root_str) / train_str,
+        Path.cwd() / train_str,
+        Path.cwd() / Path(root_str) / train_str,
     ]
-    
     for p in candidates:
         if p.exists() and p.is_dir():
             return p
-            
-    if Path(train_path).exists():
-        return Path(train_path)
     return None
 
-def get_augmentation_pipeline(img_size):
-    """Pipeline ohne Bounding-Boxes (nur Bildmanipulation)."""
+
+def build_letterbox_pipeline(img_size: int) -> A.Compose:
+    """
+    Erstellt eine reine Letterbox-Pipeline für eine gegebene Bildgröße.
+
+    LongestMaxSize skaliert das Bild so, dass die längste Seite img_size
+    erreicht ohne das Seitenverhältnis zu verändern.
+    PadIfNeeded füllt den Rest mit dem Wert 114 auf (grau) — identisch
+    zum grauen Padding in preprocess() in RPI_application.py.
+
+    Keine Augmentierung, kein Rauschen — nur das Resize, das auch auf
+    dem Pi passiert.
+    """
     return A.Compose([
-        A.OneOf([
-            A.MotionBlur(blur_limit=AUG_BLUR_LIMIT, p=0.6), 
-            A.GaussianBlur(blur_limit=(5, 9), p=0.2),
-        ], p=AUG_BLUR_PROB),
-
-        A.OneOf([
-            A.Affine(
-                shear={'y': AUG_SHEAR_Y, 'x': AUG_SHEAR_X}, 
-                scale=(0.95, 1.05), 
-                rotate=AUG_ROTATION, 
-                p=0.6
-            ), 
-        ], p=AUG_GEOM_PROB),
-
-        A.OneOf([
-            A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=0.5), 
-            A.GaussNoise(var_limit=AUG_NOISE_VAR, p=0.5),
-        ], p=AUG_NOISE_PROB),
-
-        A.RandomBrightnessContrast(p=0.5),
         A.LongestMaxSize(max_size=img_size),
-        A.PadIfNeeded(min_height=img_size, min_width=img_size, border_mode=cv2.BORDER_CONSTANT, value=114)
+        A.PadIfNeeded(
+            min_height=img_size,
+            min_width=img_size,
+            border_mode=cv2.BORDER_CONSTANT,
+            value=114,   # Grauer Rand, identisch zu YOLO-Standard und Pi-Inferenz
+        ),
     ])
 
-def apply_quantization_hardening(img):
-    """Zusätzliches Sensor-Rauschen (Hardening)."""
-    if random.random() < 0.3:
-        img = cv2.GaussianBlur(img, (3, 3), 0)
-    
-    if random.random() < 0.2:
-        noise = np.random.normal(0, 8, img.shape).astype(np.int16)
-        img = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
-        
-    return img
 
-# ===============================
-# 🚀 MAIN
-# ===============================
+def collect_images(src_dir: Path) -> list[Path]:
+    """
+    Sammelt alle Bilder aus dem Quellordner (nicht rekursiv).
+    Gibt eine sortierte, deduplizierte Liste zurück.
+    """
+    extensions = ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp",
+                  "*.JPG", "*.JPEG", "*.PNG", "*.BMP", "*.WEBP"]
+    return sorted(set(f for ext in extensions for f in src_dir.glob(ext)))
 
-def main():
-    print(f"🌱 Setze Seed auf {SEED}")
+
+# ==============================================================================
+# MAIN
+# ==============================================================================
+
+def main() -> None:
+
+    # --- Seed setzen ---
+    print(f"🌱 Seed: {SEED}")
     random.seed(SEED)
     np.random.seed(SEED)
 
-    # 1. BEREINIGUNG: Alten Ordner löschen
+    # --- Konfiguration laden ---
+    config  = load_config()
+    src_dir = resolve_train_path(config)
+
+    if not src_dir:
+        print("❌ Train-Pfad aus YAML nicht auflösbar.")
+        print("   Prüfe 'path' und 'train' in deiner tempolimits.yaml.")
+        exit(1)
+
+    print(f"📂 Quelle: {src_dir}")
+
+    # --- Bilder einsammeln ---
+    all_images = collect_images(src_dir)
+
+    if not all_images:
+        print(f"❌ Keine Bilder in '{src_dir}' gefunden.")
+        exit(1)
+
+    # Auswahl: NUM_IMAGES zufällig aus dem Gesamtpool wählen.
+    # random.sample() ohne Zurücklegen: kein Bild kommt doppelt vor.
+    if len(all_images) < NUM_IMAGES:
+        print(f"⚠ Nur {len(all_images)} Bilder verfügbar — nutze alle "
+              f"(gewünscht: {NUM_IMAGES}).")
+        selected = all_images
+    else:
+        selected = random.sample(all_images, NUM_IMAGES)
+        print(f"✔ {len(selected)} Bilder ausgewählt aus {len(all_images)} verfügbaren.")
+
+    # --- Alten Output-Ordner löschen ---
     if OUTPUT_ROOT.exists():
-        print(f"🧹 Bereinige altes Verzeichnis: {OUTPUT_ROOT}")
+        print(f"🧹 Lösche alten Output-Ordner: {OUTPUT_ROOT}")
         try:
             shutil.rmtree(OUTPUT_ROOT)
         except PermissionError:
-            print("⚠ Konnte Ordner nicht löschen (Zugriff verweigert). Bitte manuell prüfen.")
+            print("❌ Zugriff verweigert — bitte Ordner manuell löschen.")
             exit(1)
-    
+
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
-    # 2. Bilder finden
-    config = load_config()
-    source_dir = resolve_path(config)
-    
-    if not source_dir:
-        print("❌ Konnte Trainings-Ordner nicht finden!")
-        exit(1)
-
-    print(f"📂 Quelle: {source_dir}")
-    extensions = ["*.jpg", "*.jpeg", "*.png", "*.bmp"]
-    all_images = []
-    for ext in extensions:
-        all_images.extend(list(source_dir.glob(ext)))
-        all_images.extend(list(source_dir.glob(ext.upper())))
-    
-    all_images = sorted(list(set(all_images)))
-    
-    # Auswahl der Bilder
-    if len(all_images) < NUM_IMAGES:
-        print(f"⚠ Warnung: Nur {len(all_images)} Bilder gefunden. Nutze alle verfügbaren.")
-        selected_images = all_images
-    else:
-        selected_images = random.sample(all_images, NUM_IMAGES)
-        print(f"✅ Auswahl: {len(selected_images)} Bilder aus {len(all_images)}.")
-
-    # 3. Generierung
-    print(f"🚀 Starte Prozess für Auflösungen: {RESOLUTIONS}")
+    # --- Pro Auflösung ein separates Set generieren ---
+    print(f"\n🚀 Starte Generierung für Auflösungen: {RESOLUTIONS}")
 
     for res in RESOLUTIONS:
-        # Ordnerstruktur erstellen
+        print(f"\n{'='*60}")
+        print(f"  Auflösung: {res}×{res} px")
+        print(f"{'='*60}")
+
+        # Ordnerstruktur für diese Auflösung
         base_dir = OUTPUT_ROOT / f"calib_{res}px"
-        img_dir = base_dir / "images"
-        
-        base_dir.mkdir(parents=True, exist_ok=True)
+        img_dir  = base_dir / "images"
         img_dir.mkdir(parents=True, exist_ok=True)
-        
-        print(f"\n⚙️  Verarbeite {res}x{res} Pixel...")
-        
-        pipeline = get_augmentation_pipeline(res)
-        npy_data_list = [] # Liste für numpy array
 
-        for i, img_path in enumerate(tqdm(selected_images, desc=f"Res {res}")):
-            # Laden
+        pipeline    = build_letterbox_pipeline(res)
+        npy_list    = []   # Sammlung der RGB-Arrays für .npy
+        skipped     = 0
+
+        for i, img_path in enumerate(tqdm(selected, desc=f"  {res}px")):
             img = cv2.imread(str(img_path))
-            if img is None: continue
+            if img is None:
+                skipped += 1
+                continue
 
-            # Augmentation + Resize
-            augmented = pipeline(image=img)['image']
+            # Letterbox-Resize auf res×res (Seitenverhältnis bleibt erhalten)
+            processed_bgr = pipeline(image=img)['image']
 
-            # Hardening
-            final_img = apply_quantization_hardening(augmented)
+            # A) JPG speichern (BGR — cv2.imwrite-Standard, für Cloud Compiler)
+            jpg_name = f"calib_{res}px_{i:04d}.jpg"
+            cv2.imwrite(str(img_dir / jpg_name), processed_bgr)
 
-            # A) Als JPG speichern (im Unterordner 'images')
-            out_name = f"calib_{res}_{i:04d}.jpg"
-            cv2.imwrite(str(img_dir / out_name), final_img)
+            # B) RGB-Array für .npy sammeln
+            #    Der Hailo DFC erwartet bei .npy-Input RGB-Reihenfolge,
+            #    weil preprocess() auf dem Pi ebenfalls BGR→RGB konvertiert
+            #    bevor der Tensor an den Chip übergeben wird.
+            npy_list.append(cv2.cvtColor(processed_bgr, cv2.COLOR_BGR2RGB))
 
-            # B) Zur Liste hinzufügen (für .npy)
-            # WICHTIG: OpenCV ist BGR, Hailo erwartet oft RGB.
-            # Für die .npy konvertieren wir sicherheitshalber zu RGB.
-            # (Die JPGs bleiben BGR, da cv2.imread/imwrite das so handhabt, was auch okay ist).
-            final_img_rgb = cv2.cvtColor(final_img, cv2.COLOR_BGR2RGB)
-            npy_data_list.append(final_img_rgb)
+        if skipped > 0:
+            print(f"   ⚠ {skipped} Bilder übersprungen (unlesbar).")
 
-        # C) Als .npy speichern
-        print(f"💾 Erstelle calib_set.npy für {res}px (das kann kurz dauern)...")
-        npy_array = np.array(npy_data_list, dtype=np.uint8)
-        
-        npy_path = base_dir / "calib_set.npy"
+        # C) .npy speichern
+        #    Shape: (N, res, res, 3) dtype=uint8
+        print(f"💾 Erstelle calib_set.npy für {res}px ...")
+        npy_array = np.array(npy_list, dtype=np.uint8)
+        npy_path  = base_dir / "calib_set.npy"
         np.save(str(npy_path), npy_array)
-        
-        print(f"   -> Gespeichert: {npy_path}")
-        print(f"   -> Shape: {npy_array.shape} | Größe: {npy_path.stat().st_size / (1024*1024):.2f} MB")
 
-    print("\n" + "="*60)
-    print("✅ FERTIG! Neue Ordnerstruktur:")
+        size_mb = npy_path.stat().st_size / (1024 * 1024)
+        print(f"   → Shape: {npy_array.shape}  |  Größe: {size_mb:.1f} MB")
+        print(f"   → JPGs:  {img_dir}")
+        print(f"   → NPY:   {npy_path}")
+
+    # --- Abschluss ---
+    print("\n" + "=" * 60)
+    print("✅ KALIBRIERUNGSSETS FERTIG")
+    print("-" * 60)
     print(f"{OUTPUT_ROOT}/")
-    print("  ├── calib_512px/")
-    print("  │   ├── images/       (JPG Bilder für Cloud Compiler Upload)")
-    print("  │   └── calib_set.npy (Ideal für lokalen Compiler)")
-    print("  ├── calib_640px/ ...")
-    print("  └── calib_800px/ ...")
-    print("="*60)
+    for res in RESOLUTIONS:
+        print(f"  ├── calib_{res}px/")
+        print(f"  │   ├── images/        ← JPGs für Cloud Compiler (Ordner-Upload)")
+        print(f"  │   └── calib_set.npy  ← Array für lokalen DFC")
+    print("-" * 60)
+    print("  Cloud Compiler:  images/-Ordner der passenden Auflösung hochladen.")
+    print("  Lokaler DFC:     calib_set.npy als --calib-path übergeben.")
+    print("=" * 60 + "\n")
+
 
 if __name__ == "__main__":
     main()

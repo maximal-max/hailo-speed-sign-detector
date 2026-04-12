@@ -30,7 +30,7 @@ import time
 # -------------------------------------------------
 SOURCE = "screen"
 MODEL_PATH = 'runs/s_800px_ohne_130/weights/best.pt'
-SPEED_SIGN_FOLDER = 'speed_limit_images'
+SPEED_SIGN_FOLDER = 'datasets/application_images_dataset'
 
 YOUTUBE = {"top": 185, "left": 110, "width": 1280, "height": 720}
 STREET_VIEW = {"top": 0, "left": 0, "width": 1920, "height": 1080}
