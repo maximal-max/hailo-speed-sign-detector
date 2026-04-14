@@ -19,3 +19,6 @@ hailo_calibration/
 # Temporäre Dateien
 __pycache__/
 .ipynb_checkpoints/
+
+#claude files
+.claude/

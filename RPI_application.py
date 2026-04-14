@@ -73,9 +73,9 @@ AENDERUNGEN GGU. URSPRUNGSVERSION
   Fix 11: _stream_running als threading.Event (thread-sicher).
 """
 
-import os
 import sys
 import time
+from pathlib import Path
 import queue
 import threading
 import socketserver
@@ -92,15 +92,69 @@ from picamera2.devices.hailo import Hailo
 
 
 # ================================================================
-#  MODELL  <-- Hier aendern: 512 | 640 | 800
+#  KONSOLEN-HELPER  (TUI-kompatibel)
 # ================================================================
 
-MODEL_SIZE = 640   # px  ->  laedt  <MODEL_SIZE>px.hef
+_STATUS_LINE_LEN = 90   # Zeichenbreite der überschreibbaren Statuszeile
 
-# Abgeleitete Konstanten -- NICHT manuell aendern
-HEF_PATH   = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           f"{MODEL_SIZE}px.hef")
-INPUT_SIZE = MODEL_SIZE
+
+def _print_line(msg: str) -> None:
+    """
+    Gibt eine Nachricht als neue, permanente Zeile aus.
+    Nutzt ANSI-Escape (\033[2K), um die aktuelle Statuszeile hart zu löschen,
+    bevor die neue Nachricht gedruckt wird.
+    """
+    print(f"\r\033[2K{msg}", flush=True)
+
+
+# ================================================================
+#  MODELL-PFAD  (automatische Erkennung aus ./models/active_hef/)
+# ================================================================
+
+def _find_hef_path() -> Path:
+    """
+    Sucht die erste .hef-Datei in ./models/active_hef/ (relativ zum Skript).
+    Ignoriert alle anderen Unterordner wie ./models/archive/.
+    Bricht mit einem klaren Fehler ab, falls keine Datei gefunden wird.
+    """
+    models_dir = Path(__file__).resolve().parent / "models" / "active_hef"
+    hef_files  = sorted(models_dir.glob("*.hef"))
+    if not hef_files:
+        raise FileNotFoundError(
+            f"Keine .hef-Datei in '{models_dir}' gefunden.\n"
+            f"Bitte eine .hef-Datei in models/active_hef/ ablegen."
+        )
+    chosen = hef_files[0]
+    if len(hef_files) > 1:
+        others = ", ".join(f.name for f in hef_files[1:])
+        print(f"[HEF] Mehrere Modelle gefunden -- nutze '{chosen.name}' "
+              f"(ignoriert: {others})")
+    return chosen
+
+try:
+    HEF_PATH = _find_hef_path()
+except FileNotFoundError as _hef_err:
+    print(f"[FEHLER] {_hef_err}")
+    sys.exit(1)
+
+
+# ================================================================
+#  CPU-TEMPERATUR
+# ================================================================
+
+_THERMAL_PATH = Path("/sys/class/thermal/thermal_zone0/temp")
+
+
+def get_cpu_temp() -> float:
+    """
+    Liest CPU-Kerntemperatur aus dem sysfs-Interface des Linux-Kernels.
+    Gibt 0.0 zurueck wenn der Pfad nicht existiert (z.B. auf Windows,
+    oder wenn kein thermisches Subsystem verfuegbar ist).
+    """
+    try:
+        return int(_THERMAL_PATH.read_text()) / 1000.0
+    except OSError:
+        return 0.0
 
 
 # ================================================================
@@ -126,6 +180,19 @@ ROI_TOP_FRACTION = 0.70
 CONF_THRESHOLD = 0.45   # Konfidenz-Schwelle
 INFER_EVERY_N  = 2      # Jeden N-ten Frame inferieren
 DEBOUNCE_COUNT = 3      # Debouncer: benoetigte Treffer im Puffer
+
+
+# ================================================================
+#  MODELL-PARAMETER-MAPPING  (nach erkannter Eingangsbreite)
+# ================================================================
+#  Wird in SpeedSignDetector.__init__ nach get_input_shape() angewendet
+#  und ueberschreibt die obigen Defaults in _runtime.
+
+_MODEL_PARAMS: dict = {
+    512: {"conf_thresh": 0.45, "infer_every": 1, "debounce": 3},
+    640: {"conf_thresh": 0.45, "infer_every": 2, "debounce": 3},
+    800: {"conf_thresh": 0.50, "infer_every": 4, "debounce": 4},
+}
 
 
 # ================================================================
@@ -180,6 +247,12 @@ _runtime: dict = {
     "show_ai_eye":  False,    # KI-Auge: streamt NPU-Eingabe-Tensor
     "roi_crop":     False,    # Fix 6: ROI-Crop (Labortest: Standard AUS)
     "_mode_change": False,    # intern: signalisiert Kamera-Neustart
+    "hef_name":     "–",      # wird nach SpeedSignDetector.__init__ gesetzt
+    "model_res":    "–x–",    # wird nach SpeedSignDetector.__init__ gesetzt
+    "cpu_temp":     0.0,      # wird im Main-Loop alle 2 s aktualisiert
+    "fps_cam":      0.0,      # Kamera-FPS, wird jeden Frame aktualisiert
+    "fps_inf":      0.0,      # Inferenz-FPS, wird nach jedem Inf-Block gesetzt
+    "n_det":        0,        # Anzahl Detektionen im letzten Inferenz-Frame
 }
 
 
@@ -273,8 +346,7 @@ SIGN_CLASSES = {
 #  SPEED-SIGN PNG-CACHE
 # ================================================================
 
-SPEED_SIGN_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                  "datasets", "application_images_dataset")
+SPEED_SIGN_FOLDER = Path(__file__).resolve().parent / "datasets" / "application_images_dataset"
 
 # (limit, size) -> (afg_f32, one_minus_a_f32) | bgr_u8 | None
 _sign_png_cache: dict = {}
@@ -285,8 +357,8 @@ def _load_sign_png(limit: int, size: int):
     key = (limit, size)
     if key in _sign_png_cache:
         return _sign_png_cache[key]
-    path = os.path.join(SPEED_SIGN_FOLDER, f"{limit}.png")
-    raw = cv2.imread(path, cv2.IMREAD_UNCHANGED) if os.path.exists(path) else None
+    path = SPEED_SIGN_FOLDER / f"{limit}.png"
+    raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.exists() else None
     if raw is None:
         _sign_png_cache[key] = None
         return None
@@ -428,16 +500,29 @@ class SpeedSignDetector:
     HailoRT 4.20.0 auf dem Pi 5 zu vermeiden.
     """
 
-    def __init__(self, hef_path: str) -> None:
-        print(f"[Hailo] Lade Modell: {hef_path}")
-        if not os.path.exists(hef_path):
+    def __init__(self, hef_path) -> None:
+        hef_path = Path(hef_path)
+        if not hef_path.exists():
             raise FileNotFoundError(f"HEF nicht gefunden: {hef_path}")
-        self.hailo       = Hailo(hef_path, output_type="FLOAT32")
+        self.hailo       = Hailo(str(hef_path), output_type="FLOAT32")
         self.input_shape = self.hailo.get_input_shape()
         self.model_h     = self.input_shape[0]
         self.model_w     = self.input_shape[1]
-        print(f"[Hailo] Input Shape: {self.input_shape}")
-        print("[Hailo] Bereit.")
+        # Modell-Parameter aus Mapping ableiten und _runtime aktualisieren
+        params = _MODEL_PARAMS.get(self.model_w)
+        if params:
+            with _runtime_lock:
+                _runtime["conf_thresh"] = params["conf_thresh"]
+                _runtime["infer_every"] = params["infer_every"]
+                _runtime["debounce"]    = params["debounce"]
+        else:
+            _print_line(f"[WARN] Kein Param-Mapping fuer {self.model_w}px -- "
+                        f"Defaults beibehalten.")
+
+        # HEF-Name und Aufloesung fuer Web-UI speichern
+        with _runtime_lock:
+            _runtime["hef_name"]  = hef_path.name
+            _runtime["model_res"] = f"{self.model_w}x{self.model_h}"
 
     def close(self) -> None:
         try:
@@ -628,7 +713,21 @@ def _build_html(rt: dict) -> str:
         for m in CAMERA_MODES
     )
 
-    return """<!DOCTYPE html>
+    hef_name  = rt.get("hef_name",  "unbekannt")
+    model_res = rt.get("model_res", "?x?")
+    cpu_temp  = rt.get("cpu_temp",  0.0)
+    fps_cam   = rt.get("fps_cam",   0.0)
+    fps_inf   = rt.get("fps_inf",   0.0)
+    n_det     = rt.get("n_det",     0)
+    if cpu_temp > 82.0:
+        temp_badge_cls = "badge-crit"
+    elif cpu_temp > 75.0:
+        temp_badge_cls = "badge-warn"
+    else:
+        temp_badge_cls = "badge"
+    temp_val_html = f"{cpu_temp:.1f}\u00b0C" if cpu_temp > 0.0 else "\u2013"
+
+    _html = """<!DOCTYPE html>
 <html lang="de">
 <head>
 <meta charset="utf-8">
@@ -668,6 +767,24 @@ body {
   background: #141c22;
   color: #4db8ff;
   border: 1px solid #1e3040;
+  border-radius: 4px;
+  padding: 2px 9px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+}
+.badge-warn {
+  background: #2a1800;
+  color: #ff9800;
+  border: 1px solid #5a3a00;
+  border-radius: 4px;
+  padding: 2px 9px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+}
+.badge-crit {
+  background: #2a0000;
+  color: #ff4444;
+  border: 1px solid #5a0000;
   border-radius: 4px;
   padding: 2px 9px;
   font-weight: 600;
@@ -760,9 +877,19 @@ input[type=range] { flex: 1; min-width: 80px; accent-color: #4db8ff; cursor: poi
 </div>
 
 <div class="model-badge">
-  Modell: <span class="badge">MODEL_SIZE_PXpx.hef</span>
+  Modell: <span class="badge">HEF_NAME</span>
+  &middot;
+  Auflösung: <span class="badge">MODEL_RES</span>
   &middot;
   Modus: <span class="badge">CUR_MODE</span>
+  &middot;
+  Cam: <span id="badge-fps-cam" class="badge">FPS_CAM_VAL</span>&thinsp;fps
+  &middot;
+  Inf: <span id="badge-fps-inf" class="badge">FPS_INF_VAL</span>&thinsp;fps
+  &middot;
+  Det: <span id="badge-n-det" class="badge">N_DET_VAL</span>
+  &middot;
+  CPU: <span id="badge-cpu-temp" class="CPU_TEMP_CLS">CPU_TEMP_VAL</span>
 </div>
 
 <div class="settings">
@@ -817,7 +944,7 @@ input[type=range] { flex: 1; min-width: 80px; accent-color: #4db8ff; cursor: poi
       </button>
     </div>
     <span class="hint" style="display:block;margin-top:8px;line-height:1.5;color:#2e2e2e">
-      KI-Auge: MODEL_SIZE_PX&times;MODEL_SIZE_PX NPU-Tensor<br>
+      KI-Auge: MODEL_RES NPU-Tensor<br>
       ROI-Crop: untere 30% abschneiden (Auto-Modus)
     </span>
     <a class="status-link" href="/status" target="_blank">&#8599; JSON-Status</a>
@@ -847,19 +974,48 @@ function toggleRoi(btn) {
     btn.textContent = off ? "ROI-Crop\u00a0AN" : "ROI-Crop\u00a0AUS";
   }).catch(function(){});
 }
+
+/* -- Live-Status-Poller: aktualisiert Badges jede Sekunde via /status -- */
+setInterval(function() {
+  fetch("/status")
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      document.getElementById("badge-fps-cam").textContent =
+        (d.fps_cam || 0).toFixed(1);
+      document.getElementById("badge-fps-inf").textContent =
+        (d.fps_inf || 0).toFixed(1);
+      document.getElementById("badge-n-det").textContent =
+        d.n_det || 0;
+      var t  = d.cpu_temp || 0;
+      var el = document.getElementById("badge-cpu-temp");
+      el.textContent = t > 0 ? t.toFixed(1) + "\u00b0C" : "\u2013";
+      el.className   = t > 82 ? "badge-crit" : t > 75 ? "badge-warn" : "badge";
+    })
+    .catch(function(){});
+}, 1000);
 </script>
 </body>
-</html>""".replace("MODEL_SIZE_PX", str(MODEL_SIZE)) \
-           .replace("CUR_MODE",      cur_mode) \
-           .replace("MODE_BTNS",     mode_btns) \
-           .replace("CONF_PCT",      str(conf_pct)) \
-           .replace("CONF_VAL",      f"{rt['conf_thresh']:.2f}") \
-           .replace("INFER_VAL",     str(rt["infer_every"])) \
-           .replace("DEB_VAL",       str(rt["debounce"])) \
-           .replace("AI_EYE_CLS",    ai_eye_cls) \
-           .replace("AI_EYE_LBL",    ai_eye_lbl) \
-           .replace("ROI_CLS",       roi_cls) \
-           .replace("ROI_LBL",       roi_lbl)
+</html>"""
+    return (
+        _html
+        .replace("HEF_NAME",    hef_name)
+        .replace("MODEL_RES",   model_res)
+        .replace("CUR_MODE",    cur_mode)
+        .replace("MODE_BTNS",   mode_btns)
+        .replace("CONF_PCT",    str(conf_pct))
+        .replace("CONF_VAL",    f"{rt['conf_thresh']:.2f}")
+        .replace("INFER_VAL",   str(rt["infer_every"]))
+        .replace("DEB_VAL",     str(rt["debounce"]))
+        .replace("AI_EYE_CLS",  ai_eye_cls)
+        .replace("AI_EYE_LBL",  ai_eye_lbl)
+        .replace("ROI_CLS",       roi_cls)
+        .replace("ROI_LBL",       roi_lbl)
+        .replace("CPU_TEMP_CLS",  temp_badge_cls)
+        .replace("CPU_TEMP_VAL",  temp_val_html)
+        .replace("FPS_CAM_VAL",   f"{fps_cam:.1f}")
+        .replace("FPS_INF_VAL",   f"{fps_inf:.1f}")
+        .replace("N_DET_VAL",     str(n_det))
+    )
 
 
 class MJPEGHandler(http.server.BaseHTTPRequestHandler):
@@ -920,8 +1076,7 @@ class MJPEGHandler(http.server.BaseHTTPRequestHandler):
             import json
             with _runtime_lock:
                 st = {k: v for k, v in _runtime.items() if not k.startswith("_")}
-            st["model_size"]       = MODEL_SIZE
-            st["hef_path"]         = HEF_PATH
+            st["hef_path"]         = str(HEF_PATH)
             st["available_modes"]  = list(CAMERA_MODES.keys())
             st["roi_top_fraction"] = ROI_TOP_FRACTION
             self._send_text(json.dumps(st, indent=2))
@@ -973,8 +1128,6 @@ def start_stream_server(port: int = STREAM_PORT) -> None:
         target=TServer(("", port), MJPEGHandler).serve_forever,
         daemon=True
     ).start()
-    print(f"[Stream] -> http://localhost:{port}")
-    print(f"[Stream] -> http://<PI-IP>:{port}")
 
 
 # ================================================================
@@ -1047,7 +1200,6 @@ class CameraStream:
         self._thread.start()
         while self.read() is None:
             time.sleep(0.01)
-        print("[CameraStream] Thread gestartet.")
 
     def stop(self) -> None:
         """Fix 5: Aktives Warten auf Thread-Ende (join) statt nur Flag setzen."""
@@ -1067,7 +1219,7 @@ class CameraStream:
                     self._frame = np.copy(frame)
             except Exception as e:
                 if self._active:
-                    print(f"[CameraStream] Fehler: {e}")
+                    _print_line(f"[FEHLER] CameraStream: {e}")
                 break
 
     def read(self) -> Optional[np.ndarray]:
@@ -1191,28 +1343,6 @@ def draw_speed_display(frame_bgr: np.ndarray, state: SpeedStateMachine,
                     -90, 0, angle, (0, 220, 120), arc_t)
 
 
-def draw_info(frame_bgr: np.ndarray, fps_cam: float, fps_inf: float,
-              n_det: int, mode: str, roi_active: bool) -> None:
-    """
-    Info-Leiste unten links.
-    Feste Pixelgroesse -- skaliert NICHT mit der Kamera-Aufloesung.
-    Zeigt: Kamera-FPS | Inferenz-FPS | Anzahl Detektionen | Modus | ROI-Status.
-    """
-    fh, fw  = frame_bgr.shape[:2]
-    roi_tag = " ROI" if roi_active else ""
-    line    = (f"Cam:{fps_cam:.0f}  Inf:{fps_inf:.0f} fps"
-               f"  |  Det:{n_det}  |  {mode}{roi_tag}")
-
-    (tw, _), _ = cv2.getTextSize(line, INFO_FONT, INFO_FS, INFO_THICKNESS)
-    bar_h = INFO_LINE_H + INFO_PAD_Y * 2
-    bar_w = min(tw + INFO_PAD_X * 2, fw)
-
-    cv2.rectangle(frame_bgr, (0, fh - bar_h), (bar_w, fh), INFO_BG_COLOR, -1)
-    cv2.putText(frame_bgr, line,
-                (INFO_PAD_X, fh - INFO_PAD_Y - 2),
-                INFO_FONT, INFO_FS, INFO_COLOR, INFO_THICKNESS, cv2.LINE_AA)
-
-
 # ================================================================
 #  KAMERA-NEUSTART
 # ================================================================
@@ -1240,7 +1370,7 @@ def _build_camera_controls(frame_us: int) -> dict:
 def restart_camera(cam: Picamera2, mode_name: str) -> tuple:
     cam_w, cam_h, fps = CAMERA_MODES.get(mode_name, CAMERA_MODES[DEFAULT_MODE])
     frame_us = int(1_000_000 / fps)
-    print(f"\n[Kamera] Wechsle -> {mode_name}")
+    _print_line(f"[Kamera] Modusaenderung -> {mode_name}")
     cam.stop()
     cfg = cam.create_video_configuration(
         main={"format": "BGR888", "size": (cam_w, cam_h)},
@@ -1251,7 +1381,6 @@ def restart_camera(cam: Picamera2, mode_name: str) -> tuple:
     cam.configure(cfg)
     cam.start()
     time.sleep(1.5)
-    print(f"[Kamera] Modus aktiv: {mode_name}\n")
     return cam_w, cam_h, fps
 
 
@@ -1261,24 +1390,21 @@ def restart_camera(cam: Picamera2, mode_name: str) -> tuple:
 
 def main() -> None:
 
-    print("=" * 55)
-    print("  Speed Sign Detector -- HailoRT 4.20.0")
-    print(f"  Modell   : {MODEL_SIZE}px  ({HEF_PATH})")
-    print(f"  Startmode: {DEFAULT_MODE}")
-    print("=" * 55)
+    # --- Initialisierung (Fortschritts-Feedback einzeilig) ---
+    print("Starte Speed Sign Detector ...")
 
-    # Fix 1: Encode-Worker-Thread starten
+    # Fix 1: Encode-Worker-Thread starten (still)
     threading.Thread(target=_encode_worker, daemon=True,
                      name="EncodeWorker").start()
-    print("[Encode] Async JPEG-Worker gestartet.")
-
     start_stream_server()
 
+    print("  [1/3] Hailo-NPU ...", end="", flush=True)
     try:
         detector = SpeedSignDetector(HEF_PATH)
     except Exception as e:
-        print(f"[FEHLER] Hailo: {e}")
+        print(f" FEHLER\n[FEHLER] Hailo: {e}")
         sys.exit(1)
+    print(" OK")
 
     ffmpeg_pipe = None
     if FFMPEG_MODE:
@@ -1288,27 +1414,38 @@ def main() -> None:
         except Exception as e:
             print(f"[WARNUNG] FFmpeg: {e}")
 
-    print("\n[Kamera] Starte Picamera2 ...")
+    print("  [2/3] Picamera2 ...", end="", flush=True)
     cam                   = Picamera2()
     cam_w, cam_h, fps     = CAMERA_MODES[DEFAULT_MODE]
     frame_us              = int(1_000_000 / fps)
-
     cfg = cam.create_video_configuration(
         main={"format": "BGR888", "size": (cam_w, cam_h)},
         controls=_build_camera_controls(frame_us),
-        display=None,   # Pflicht: verhindert xrdp-Absturz unter Wayland
+        display=None,
         encode=None
     )
     cam.configure(cfg)
     cam.start()
     time.sleep(2.0)
+    print(" OK")
 
+    print("  [3/3] CameraStream ...", end="", flush=True)
     cam_stream = CameraStream(cam)
     cam_stream.start()
+    print(" OK")
 
-    print(f"[Kamera] Bereit: {cam_w}x{cam_h}@{fps} fps")
-    print(f"[System] Web-UI : http://localhost:{STREAM_PORT}")
-    print("[System] Beenden: Ctrl+C\n")
+    # --- Startup-Banner nach erfolgreicher Initialisierung ---
+    _params = _MODEL_PARAMS.get(detector.model_w, {})
+    print(f"\n{'=' * 57}")
+    print(f"  Speed Sign Detector  \u00b7  HailoRT 4.20.0")
+    print(f"  {'=' * 53}")
+    print(f"  Modell    : {HEF_PATH.name:<20}  [{detector.model_w}x{detector.model_h} px]")
+    print(f"  Inferenz  : conf={_params.get('conf_thresh', CONF_THRESHOLD)}"
+          f"  every={_params.get('infer_every', INFER_EVERY_N)}"
+          f"  debounce={_params.get('debounce', DEBOUNCE_COUNT)}")
+    print(f"  Kamera    : {cam_w}x{cam_h} @ {fps} fps")
+    print(f"  Stream    : http://localhost:{STREAM_PORT}")
+    print(f"{'=' * 57}\n")
 
     state     = SpeedStateMachine()
     debouncer = TemporalDebouncer(buffer_size=5, required_hits=3)
@@ -1324,11 +1461,17 @@ def main() -> None:
     last_inf_frame: Optional[np.ndarray] = None # Frame auf dem Inferenz lief
     last_roi_offset_y                  = 0
     debounce_progress                  = 0
-    current_mode                       = DEFAULT_MODE
+    last_temp_t                        = 0.0   # Zeitstempel letzter Temperaturlesung
+    last_logged_limit: Optional[int]   = None  # Change-Detection fuer BESTAETIGT-Log
 
     try:
         while True:
             t0 = time.perf_counter()
+
+            # CPU-Temperatur alle 2 Sekunden aktualisieren (Datei-I/O vermeiden)
+            if t0 - last_temp_t >= 2.0:
+                set_runtime("cpu_temp", get_cpu_temp())
+                last_temp_t = t0
 
             # -----------------------------------------------------------
             # Fix 7: Runtime-Werte einmal pro Loop-Durchlauf cachen.
@@ -1344,7 +1487,6 @@ def main() -> None:
                 new_mode = get_runtime("camera_mode")
                 cam_stream.stop()                          # Fix 5: join() intern
                 cam_w, cam_h, fps = restart_camera(cam, new_mode)
-                current_mode      = new_mode
                 last_detections   = []
                 last_primary      = None
                 last_img_rgb      = None
@@ -1363,7 +1505,7 @@ def main() -> None:
             # -----------------------------------------------------------
             if frame_bgr is None:
                 if not cam_stream._thread.is_alive():
-                    print("[WARNING] CameraStream-Thread tot -- starte neu ...")
+                    _print_line("[WARN] CameraStream-Thread tot -- starte neu ...")
                     cam_stream = CameraStream(cam)
                     cam_stream.start()
                 else:
@@ -1402,26 +1544,28 @@ def main() -> None:
 
                 if confirmed is not None:
                     state.update(confirmed)
-                    name = SIGN_CLASSES.get(confirmed, {}).get("name", "?")
-                    print(f"[BESTAETIGT] {name} -> {state.current_limit} km/h")
+                    if state.current_limit != last_logged_limit:
+                        name = SIGN_CLASSES.get(confirmed, {}).get("name", "?")
+                        _print_line(f"[SCHILD] {name} -> {state.current_limit} km/h")
+                        last_logged_limit = state.current_limit
 
                 inf_times.append(time.perf_counter() - t_inf)
                 if len(inf_times) > 30:
                     inf_times.pop(0)
                 fps_inf = 1.0 / (sum(inf_times) / len(inf_times))
+                set_runtime("fps_inf", fps_inf)
+                set_runtime("n_det",   len(last_detections))
 
             # Frische Kopie des Inferenz-Frames pro Iteration verhindert
             # Annotations-Akkumulation bei mehreren Nicht-Inferenz-Frames.
             enc_frame = last_inf_frame.copy() if last_inf_frame is not None else frame_bgr
             draw_detections(enc_frame, last_detections, last_primary)
             draw_speed_display(enc_frame, state, debounce_progress, deb_count)
-            draw_info(enc_frame, fps_cam, fps_inf,
-                      len(last_detections), current_mode, roi_active)
 
             # Fix 1: Frame asynchron in Encode-Queue einreihen.
             if ffmpeg_pipe:
                 if not ffmpeg_pipe.write(enc_frame):
-                    print("[FFmpeg] Pipe unterbrochen -> MJPEG")
+                    _print_line("[WARN] FFmpeg-Pipe unterbrochen -> MJPEG")
                     ffmpeg_pipe = None
             if not ffmpeg_pipe:
                 try:
@@ -1429,16 +1573,30 @@ def main() -> None:
                 except queue.Full:
                     pass
 
-            # FPS messen
+            # FPS messen und in _runtime schreiben (fuer /status + Web-UI)
             cam_times.append(time.perf_counter() - t0)
             if len(cam_times) > 60:
                 cam_times.pop(0)
             fps_cam = 1.0 / (sum(cam_times) / len(cam_times))
+            set_runtime("fps_cam", fps_cam)
+
+            # TUI-Statuszeile (hartes Löschen via ANSI, springt an den Anfang via \r)
+            _limit = state.current_limit
+            _temp  = get_runtime("cpu_temp")
+            _line  = (f"FPS: {fps_cam:.0f}/{fps_inf:.0f}"
+                      f"  |  Temp: {_temp:.1f}°C"
+                      f"  |  Schild: {f'{_limit} km/h' if _limit else '---'}"
+                      f"  |  Det: {len(last_detections)}")
+            
+            print(f"\r\033[2K{_line}", end="", flush=True)
 
     except KeyboardInterrupt:
-        print("\n[System] Beende ...")
+        pass   # sauberer Abbruch -- Banner folgt im finally
 
     finally:
+        # Statuszeile abschliessen (Leerzeichen-Padding loescht letzte Zeile)
+        print(f"\r{'':<{_STATUS_LINE_LEN}}", flush=True)
+        print("[System] Beende ...")
         # Fix 11: Event statt bool-Flag signalisieren
         _stream_event.clear()
         try:
@@ -1447,7 +1605,6 @@ def main() -> None:
             pass
         try:
             cam.stop()
-            print("[Kamera] Gestoppt.")
         except Exception:
             pass
         detector.close()

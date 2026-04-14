@@ -1,4 +1,4 @@
-# 🚦 Echtzeit-Verkehrsschilderkennung auf dem Raspberry Pi 5 + Hailo-8
+# Echtzeit-Verkehrsschilderkennung — Raspberry Pi 5 + Hailo-8
 
 Echtzeit-Erkennung von Tempolimits und Verkehrsschildern mit YOLOv8s, optimiert für den Hailo-8 KI-Beschleuniger. Das System erkennt 20 Schildklassen — von Tempolimits über Ortsschilder bis hin zu Autobahnschildern — bei Geschwindigkeiten bis 130 km/h.
 
@@ -34,18 +34,19 @@ Echtzeit-Erkennung von Tempolimits und Verkehrsschildern mit YOLOv8s, optimiert 
 ## Projektstruktur
 
 ```
-📦 Projekt-Root
+hailo-speed-sign-detector/
 │
-├── tempolimits.yaml              ← Zentrale Konfig: Klassen + Datenpfade
+├── tempolimits.yaml                ← Zentrale Konfig: Klassen + Datenpfade
 │
-├── split_dataset.py              ← Schritt 1: Rohdaten aufteilen (train/val)
-├── train_yolo.py                 ← Schritt 2: Training + ONNX-Export
-├── generate_universal_calib.py   ← Schritt 3: Kalibrierungsset für Hailo DFC
+├── split_dataset.py                ← Schritt 1: Rohdaten aufteilen (train/val)
+├── train_yolo.py                   ← Schritt 2: Training + ONNX-Export
+├── generate_universal_calib.py     ← Schritt 3: Kalibrierungsset für Hailo DFC
 │
-├── compare_models.py             ← Hilfstool: Trainingsläufe vergleichen
-├── setup_venv.bat                ← Windows: Trainingsumgebung einrichten
+├── compare_models.py               ← Hilfstool: Trainingsläufe vergleichen
+├── setup_venv.bat                  ← Windows: Trainingsumgebung einrichten
 │
-└── RPI_application.py            ← Raspberry Pi: Echtzeit-Inferenz
+├── RPI_application.py              ← Raspberry Pi: Echtzeit-Inferenz + Web-UI
+└── PC_application.py               ← Windows-PC: Testen mit Webcam / Bildschirm
 ```
 
 ---
@@ -64,7 +65,7 @@ Installiert Python 3.11.9, PyTorch mit CUDA 12.1, Ultralytics, Albumentations un
 
 ```
 datasets/
-└── Tempo-Dataset/
+└── stable_tempo_dataset/
     ├── images/
     └── labels/        ← YOLO-Format (.txt, eine Zeile pro Schild)
 ```
@@ -124,7 +125,15 @@ hailo_calibration/
 3. `hailo_calibration/calib_640px/images/` als Kalibrierungsordner hochladen
 4. Kompiliertes `640px.hef` herunterladen und auf den Pi kopieren
 
-### 7. Inferenz auf dem Raspberry Pi 5
+### 7. Testen auf dem Windows-PC
+
+```bash
+python PC_application.py
+```
+
+Lädt das trainierte `best.pt`-Modell und zeigt eine Echtzeit-Inferenz auf Webcam oder Bildschirmaufnahme — kein Raspberry Pi erforderlich. Die Ergebnisse werden in einem automotive HUD-Design dargestellt.
+
+### 8. Inferenz auf dem Raspberry Pi 5
 
 ```bash
 /usr/bin/python3 RPI_application.py
@@ -162,6 +171,30 @@ LongestMaxSize(max_size=N) + PadIfNeeded(N×N, border=CONSTANT, value=114)
 ```
 
 Das ist der einzige Preprocessing-Schritt, der in allen drei Kontexten vorkommt — und er muss pixel-identisch sein.
+
+---
+
+## PC-Anwendung (`PC_application.py`)
+
+Ermöglicht das vollständige Testen des trainierten Modells auf einem Windows-PC ohne Raspberry Pi.
+
+### Eingabemodi
+
+| Modus | Beschreibung |
+|---|---|
+| Webcam | Kameraindex 0 (über OpenCV) |
+| Screen Capture | Bildschirmaufnahme via `mss`-Bibliothek |
+
+### Oberfläche
+
+- **Automotive HUD**: Dunkles Cockpit-Design mit farbkodierten Geschwindigkeitszonen
+- **Live-Trackbars**: Konfidenz, Stable Frames, Infer-Every-N, Mindest-Boxgröße
+- **FPS-Anzeige**: Getrennte Messung für Kamera und Inferenz
+- **Keyboard-Shortcuts**: `q` / `ESC` = Beenden, `r` = Reset, `s` = Screenshot, `c` = Zentrierte Ansicht
+
+### Identische Logik
+
+`PC_application.py` verwendet dieselbe `SpeedStateMachine` und denselben `TemporalDebouncer` wie `RPI_application.py` — Ergebnisse sind direkt vergleichbar.
 
 ---
 
@@ -258,6 +291,6 @@ Vollständige Installation via `setup_venv.bat`. Kernpakete:
 | onnxruntime-gpu | 1.20.1 | ONNX-Inferenz (optional) |
 | opencv-python | 4.10.0.84 | Bildverarbeitung |
 | numpy | 1.26.4 | Array-Operationen (< 2.0 für ONNX-Kompatibilität) |
+| mss | — | Bildschirmaufnahme (`PC_application.py`) |
 
 Auf dem Raspberry Pi: `picamera2`, `hailo` (HailoRT 4.20.0), `opencv-python`, `numpy`.
-
