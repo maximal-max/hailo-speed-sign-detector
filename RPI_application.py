@@ -95,7 +95,7 @@ from picamera2.devices.hailo import Hailo
 #  MODELL  <-- Hier aendern: 512 | 640 | 800
 # ================================================================
 
-MODEL_SIZE = 800   # px  ->  laedt  <MODEL_SIZE>px.hef
+MODEL_SIZE = 640   # px  ->  laedt  <MODEL_SIZE>px.hef
 
 # Abgeleitete Konstanten -- NICHT manuell aendern
 HEF_PATH   = os.path.join(os.path.dirname(os.path.abspath(__file__)),
