@@ -70,6 +70,8 @@ echo.
 echo ================================
 echo 3) YOLO ^& Vision Toolkit
 echo ================================
+REM opencv-python (mit GUI-Support) benoetigt fuer PC_application.py (imshow, namedWindow)
+REM NICHT opencv-python-headless verwenden - das unterstuetzt keine Fenster!
 pip install ultralytics opencv-python==4.10.0.84 albumentations==1.4.18 lapx==0.5.11.post1 seaborn==0.13.2 pillow==11.0.0
 if errorlevel 1 ( echo FEHLER bei YOLO/Vision Toolkit & exit /b 1 )
 
@@ -92,10 +94,11 @@ if errorlevel 1 ( echo FEHLER bei onnx-graphsurgeon ^(NVIDIA NGC Index^) & exit 
 
 echo.
 echo ================================
-echo 6) Tracking/Inference Boost
+echo 6) Tracking/Inference/Capture
 echo ================================
-pip install supervision==0.23.0 norfair==2.3.0
-if errorlevel 1 ( echo FEHLER bei Tracking/Inference & exit /b 1 )
+REM mss: Screen-Capture fuer PC_application.py (SOURCE="screen")
+pip install supervision==0.23.0 norfair==2.3.0 mss
+if errorlevel 1 ( echo FEHLER bei Tracking/Inference/Capture & exit /b 1 )
 
 echo.
 echo =================================================
@@ -106,6 +109,8 @@ python -c "import ultralytics; print(f'Ultralytics:   {ultralytics.__version__}'
 python -c "import numpy; print(f'Numpy:         {numpy.__version__} (Soll <2.0!)')"
 python -c "import onnx; print(f'ONNX:          {onnx.__version__}')"
 python -c "import onnxruntime; print(f'onnxruntime:   {onnxruntime.__version__}')"
+python -c "import cv2; print(f'OpenCV:        {cv2.__version__} | GUI: {hasattr(cv2, \"namedWindow\")}')"
+python -c "import mss; print(f'mss:           OK')"
 
 echo.
 echo ================================================
