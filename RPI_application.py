@@ -269,6 +269,38 @@ SIGN_CLASSES = {
     19: {"name": "Ende_Autobahn"},
 }
 
+# ================================================================
+#  SPEED-SIGN PNG-CACHE
+# ================================================================
+
+SPEED_SIGN_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "datasets", "application_images_dataset")
+
+# (limit, size) -> (afg_f32, one_minus_a_f32) | bgr_u8 | None
+_sign_png_cache: dict = {}
+
+
+def _load_sign_png(limit: int, size: int):
+    """Resizes and pre-converts PNG once; returns compositing-ready arrays or None."""
+    key = (limit, size)
+    if key in _sign_png_cache:
+        return _sign_png_cache[key]
+    path = os.path.join(SPEED_SIGN_FOLDER, f"{limit}.png")
+    raw = cv2.imread(path, cv2.IMREAD_UNCHANGED) if os.path.exists(path) else None
+    if raw is None:
+        _sign_png_cache[key] = None
+        return None
+    scaled = cv2.resize(raw, (size, size), interpolation=cv2.INTER_AREA)
+    if scaled.ndim == 3 and scaled.shape[2] == 4:
+        a   = scaled[:, :, 3:4].astype(np.float32) / 255.0
+        fg  = scaled[:, :, :3].astype(np.float32)
+        result = (a * fg, 1.0 - a)          # precompute both blend terms
+    else:
+        result = scaled[:, :, :3]
+    _sign_png_cache[key] = result
+    return result
+
+
 # Standard-BGR-Farben -- imencode codiert korrekt; Browser zeigt RGB.
 BBOX_COLORS = {
     **{i: (0, 200, 0) for i in range(12)},  # Gruen   BGR(0,200,0)
@@ -1094,50 +1126,63 @@ def draw_detections(frame_bgr: np.ndarray, detections: list,
 def draw_speed_display(frame_bgr: np.ndarray, state: SpeedStateMachine,
                        debounce_progress: int, debounce_total: int) -> None:
     """
-    Rundes Geschwindigkeitsschild-Overlay oben rechts.
+    Geschwindigkeitsschild-Overlay oben rechts.
 
-    Ringfarben (Standard-BGR):
-      Roter Ring  BGR(0,0,220)   -- alle direkten Tempolimits
-      Blauer Ring BGR(220,80,0)  -- Autobahn (130) + Spielstrasse (7)
+    Bevorzugt PNG aus datasets/application_images_dataset/<limit>.png
+    (mit Alpha-Compositing). Fallback: gezeichneter Kreis (BGR).
+
+    Debounce-Bogen wird in beiden Fällen auf das Schild gelegt.
     """
     limit = state.current_limit
     if limit is None:
         return
 
-    fh, fw  = frame_bgr.shape[:2]
-    radius  = int(_sc(fh, 62))
-    cx      = fw - radius - int(_sc(fh, 18))
-    cy      = radius + int(_sc(fh, 18))
-    ring_w  = max(3, int(_sc(fh, 9)))
-    inner_r = radius - ring_w
+    fh, fw = frame_bgr.shape[:2]
+    radius = int(_sc(fh, 62))
+    cx     = fw - radius - int(_sc(fh, 18))
+    cy     = radius + int(_sc(fh, 18))
+    size   = radius * 2
+    x1, y1 = cx - radius, cy - radius
+    x2, y2 = x1 + size,   y1 + size
 
-    ring_color = (220, 80, 0) if state.use_blue_circle else (0, 0, 220)
-    fill_color = (255, 255, 255)
-    text_color = (20,   20,  20)
-    unit_color = (80,   80,  80)
+    png = _load_sign_png(limit, size)
 
-    shadow = max(2, int(_sc(fh, 4)))
-    cv2.circle(frame_bgr, (cx + shadow, cy + shadow), radius, (0, 0, 0), -1)
-    cv2.circle(frame_bgr, (cx, cy), radius, ring_color, -1)
-    cv2.circle(frame_bgr, (cx, cy), inner_r, fill_color, -1)
+    if png is not None and x1 >= 0 and y1 >= 0 and x2 <= fw and y2 <= fh:
+        if isinstance(png, tuple):
+            afg, one_minus_a = png
+            bg = frame_bgr[y1:y2, x1:x2].astype(np.float32)
+            frame_bgr[y1:y2, x1:x2] = (afg + one_minus_a * bg).astype(np.uint8)
+        else:
+            frame_bgr[y1:y2, x1:x2] = png
+    else:
+        ring_w  = max(3, int(_sc(fh, 9)))
+        inner_r = radius - ring_w
 
-    txt    = str(limit)
-    fs_num = _sc(fh, 1.2) if len(txt) >= 3 else _sc(fh, 1.65)
-    t_num  = max(1, int(_sc(fh, 2.5)))
-    (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_DUPLEX, fs_num, t_num)
-    cv2.putText(frame_bgr, txt,
-                (cx - tw // 2, cy + th // 2),
-                cv2.FONT_HERSHEY_DUPLEX, fs_num, text_color, t_num, cv2.LINE_AA)
+        ring_color = (220, 80, 0) if state.use_blue_circle else (0, 0, 220)
 
-    fs_u = _sc(fh, 0.37)
-    t_u  = max(1, int(_sc(fh, 1)))
-    (uw, _), _ = cv2.getTextSize("km/h", cv2.FONT_HERSHEY_SIMPLEX, fs_u, t_u)
-    uy = cy + th // 2 + int(_sc(fh, 17))
-    if uy < cy + inner_r - 4:
-        cv2.putText(frame_bgr, "km/h",
-                    (cx - uw // 2, uy),
-                    cv2.FONT_HERSHEY_SIMPLEX, fs_u, unit_color, t_u, cv2.LINE_AA)
+        shadow = max(2, int(_sc(fh, 4)))
+        cv2.circle(frame_bgr, (cx + shadow, cy + shadow), radius, (0, 0, 0), -1)
+        cv2.circle(frame_bgr, (cx, cy), radius, ring_color, -1)
+        cv2.circle(frame_bgr, (cx, cy), inner_r, (255, 255, 255), -1)
 
+        txt    = str(limit)
+        fs_num = _sc(fh, 1.2) if len(txt) >= 3 else _sc(fh, 1.65)
+        t_num  = max(1, int(_sc(fh, 2.5)))
+        (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_DUPLEX, fs_num, t_num)
+        cv2.putText(frame_bgr, txt,
+                    (cx - tw // 2, cy + th // 2),
+                    cv2.FONT_HERSHEY_DUPLEX, fs_num, (20, 20, 20), t_num, cv2.LINE_AA)
+
+        fs_u = _sc(fh, 0.37)
+        t_u  = max(1, int(_sc(fh, 1)))
+        (uw, _), _ = cv2.getTextSize("km/h", cv2.FONT_HERSHEY_SIMPLEX, fs_u, t_u)
+        uy = cy + th // 2 + int(_sc(fh, 17))
+        if uy < cy + inner_r - 4:
+            cv2.putText(frame_bgr, "km/h",
+                        (cx - uw // 2, uy),
+                        cv2.FONT_HERSHEY_SIMPLEX, fs_u, (80, 80, 80), t_u, cv2.LINE_AA)
+
+    # Debounce-Bogen -- liegt auf PNG und gezeichnetem Schild
     if debounce_total > 1 and debounce_progress > 0:
         angle = int(360 * min(debounce_progress, debounce_total) / debounce_total)
         arc_r = radius + int(_sc(fh, 5))
@@ -1273,12 +1318,13 @@ def main() -> None:
     fps_cam                       = 0.0
     fps_inf                       = 0.0
     frame_count                   = 0
-    last_detections: list         = []
-    last_primary: Optional[dict]  = None
+    last_detections: list              = []
+    last_primary: Optional[dict]       = None
     last_img_rgb: Optional[np.ndarray] = None   # KI-Auge Cache
-    last_roi_offset_y             = 0
-    debounce_progress             = 0
-    current_mode                  = DEFAULT_MODE
+    last_inf_frame: Optional[np.ndarray] = None # Frame auf dem Inferenz lief
+    last_roi_offset_y                  = 0
+    debounce_progress                  = 0
+    current_mode                       = DEFAULT_MODE
 
     try:
         while True:
@@ -1302,6 +1348,7 @@ def main() -> None:
                 last_detections   = []
                 last_primary      = None
                 last_img_rgb      = None
+                last_inf_frame    = None
                 last_roi_offset_y = 0
                 debouncer.reset()
                 cam_stream = CameraStream(cam)
@@ -1332,9 +1379,12 @@ def main() -> None:
             if frame_count % infer_every == 0:
                 t_inf = time.perf_counter()
 
+                # cam_stream.read() liefert bereits np.copy() -- Referenz reicht.
+                last_inf_frame = frame_bgr
+
                 # Fix 6: ROI-Crop-Flag aus gecachtem Laufzeit-Wert
                 img_rgb, scale, pad_x, pad_y, roi_offset_y = detector.preprocess(
-                    frame_bgr, cam_w, cam_h, apply_roi_crop=roi_active)
+                    last_inf_frame, cam_w, cam_h, apply_roi_crop=roi_active)
                 last_img_rgb      = img_rgb
                 last_roi_offset_y = roi_offset_y
                 result            = detector.run(img_rgb)
@@ -1360,34 +1410,24 @@ def main() -> None:
                     inf_times.pop(0)
                 fps_inf = 1.0 / (sum(inf_times) / len(inf_times))
 
-            # Visualisierung auf BGR-Frame (in-place)
-            draw_detections(frame_bgr, last_detections, last_primary)
-            draw_speed_display(frame_bgr, state, debounce_progress, deb_count)
-            draw_info(frame_bgr, fps_cam, fps_inf,
+            # Frische Kopie des Inferenz-Frames pro Iteration verhindert
+            # Annotations-Akkumulation bei mehreren Nicht-Inferenz-Frames.
+            enc_frame = last_inf_frame.copy() if last_inf_frame is not None else frame_bgr
+            draw_detections(enc_frame, last_detections, last_primary)
+            draw_speed_display(enc_frame, state, debounce_progress, deb_count)
+            draw_info(enc_frame, fps_cam, fps_inf,
                       len(last_detections), current_mode, roi_active)
 
-            # -----------------------------------------------------------
             # Fix 1: Frame asynchron in Encode-Queue einreihen.
-            # frame_bgr ist hier fertig gezeichnet. Da cam_stream.read()
-            # bereits eine Kopie liefert und wir in der naechsten
-            # Iteration eine neue Kopie holen, ist kein weiteres
-            # np.copy() noetig -- der Encode-Worker sieht stets den
-            # fertig annotierten Frame dieser Iteration.
-            # -----------------------------------------------------------
             if ffmpeg_pipe:
-                if not ffmpeg_pipe.write(frame_bgr):
+                if not ffmpeg_pipe.write(enc_frame):
                     print("[FFmpeg] Pipe unterbrochen -> MJPEG")
                     ffmpeg_pipe = None
-                    try:
-                        _encode_queue.put_nowait((frame_bgr, last_img_rgb))
-                    except queue.Full:
-                        pass
-                # Bei aktivem FFmpeg: kein MJPEG-Encoding
-            else:
+            if not ffmpeg_pipe:
                 try:
-                    _encode_queue.put_nowait((frame_bgr, last_img_rgb))
+                    _encode_queue.put_nowait((enc_frame, last_img_rgb))
                 except queue.Full:
-                    pass   # Frame verwerfen statt blockieren
+                    pass
 
             # FPS messen
             cam_times.append(time.perf_counter() - t0)
