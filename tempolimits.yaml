@@ -8,8 +8,8 @@
 #
 # ===============================================================
 
-# WICHTIG: Pfad zu den Bildern (ABSOLUTER Pfad, mit '/' statt '\')
-path: D:/Entwicklungsprojekt/hailo-speed-sign-detector/datasets/sorted_dataset #<-- ANPASSEN!
+# Pfad zum Dataset – relativ zur Position dieser YAML-Datei
+path: datasets/sorted_dataset
 
 # Diese Pfade sind relativ zum 'path' oben
 train: images/train

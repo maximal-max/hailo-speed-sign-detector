@@ -108,10 +108,10 @@ python split_dataset.py
 
 Erzeugt `sorted_dataset/` mit `train/` (80%) und `val/` (20%), stratifiziert nach Klasse — seltene Schilder landen garantiert auch im Validierungsset.
 
-### 3. `tempolimits.yaml` anpassen
+### 3. `tempolimits.yaml` prüfen
 
 ```yaml
-path: D:/Dein/Pfad/datasets/sorted_dataset   # ← anpassen
+path: datasets/sorted_dataset   # relativ zur YAML-Datei, kein Anpassen nötig
 train: images/train
 val:   images/val
 
@@ -120,6 +120,8 @@ names:
   1: Tempolimit_30
   # ...
 ```
+
+Der Pfad ist relativ zur Position der `tempolimits.yaml` und funktioniert auf jedem Rechner ohne Änderung, solange die Ordnerstruktur erhalten bleibt.
 
 ### 4. Training starten
 
@@ -225,14 +227,16 @@ Ermöglicht das vollständige Testen des trainierten Modells auf einem Windows-P
 | Modus | Beschreibung |
 |---|---|
 | Webcam | Kameraindex 0 (über OpenCV) |
-| Screen Capture | Bildschirmaufnahme via `mss`-Bibliothek |
+| Screen Capture | Bildschirmaufnahme via `mss`-Bibliothek (schnell: `frombuffer` + BGR-Slice) |
 
-### Oberfläche
+### Oberfläche (v3)
 
+- **Ein Fenster**: Kamerabild und Dashboard werden zu einem einzigen Fenster zusammengefügt (`Camera | Dashboard`)
 - **Automotive HUD**: Dunkles Cockpit-Design mit farbkodierten Geschwindigkeitszonen
-- **Live-Trackbars**: Konfidenz, Stable Frames, Infer-Every-N, Mindest-Boxgröße
-- **FPS-Anzeige**: Getrennte Messung für Kamera und Inferenz
-- **Keyboard-Shortcuts**: `q` / `ESC` = Beenden, `r` = Reset, `s` = Screenshot, `c` = Zentrierte Ansicht
+- **Interaktive Dashboard-Schieber**: Konfidenz, Stabile Frames, Infer-Every-N, Mindest-Boxgröße und Zentriert-Toggle — per Maus klicken & ziehen, keine OpenCV-Trackbars
+- **IMG_SIZE automatisch**: wird beim Start aus den Modell-Metadaten gelesen, muss nicht manuell gesetzt werden
+- **FPS-Anzeige**: Getrennte Messung für Kamera und Inferenz (Inference läuft asynchron im Hintergrund-Thread)
+- **Keyboard-Shortcuts**: `q` / `ESC` = Beenden, `r` = Reset, `s` = Screenshot
 
 ### Identische Logik
 
