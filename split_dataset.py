@@ -194,12 +194,13 @@ def copy_files(final_sets, file_contents):
             lbl_src = get_label_path(img_src)
             
             img_dst = TARGET_DIR / "images" / split_name / img_src.name
-            
+            lbl_dst = None
+
             if lbl_src and lbl_src.exists():
                 lbl_dst = TARGET_DIR / "labels" / split_name / lbl_src.name
-            
+
             shutil.copy2(img_src, img_dst)
-            if lbl_src and lbl_src.exists():
+            if lbl_dst is not None:
                 shutil.copy2(lbl_src, lbl_dst)
             
             classes = file_contents[img_src]

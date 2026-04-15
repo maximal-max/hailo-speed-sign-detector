@@ -31,23 +31,54 @@ Echtzeit-Erkennung von Tempolimits und Verkehrsschildern mit YOLOv8s, optimiert 
 
 ---
 
+## Plattform-Architektur
+
+Das Projekt ist bewusst auf zwei Plattformen aufgeteilt. **Nur zwei Dateien laufen auf dem Raspberry Pi** — alles andere gehört auf den Windows-Entwicklungsrechner.
+
+| Schritt | Datei | Plattform |
+|---|---|---|
+| Umgebung einrichten | `setup_venv.bat` | Windows |
+| Datensatz aufteilen | `split_dataset.py` | Windows |
+| Modell trainieren + exportieren | `train_yolo.py` | Windows (CUDA) |
+| Kalibrierungsset erstellen | `generate_universal_calib.py` | Windows |
+| Modell kompilieren (`.hef`) | Hailo Cloud Compiler | Web / Windows |
+| Modell auf dem PC testen | `PC_application.py` | Windows |
+| Trainingsläufe vergleichen | `compare_models.py` | Windows |
+| **Inferenz (Entwicklung)** | **`RPI_debug.py`** | **Raspberry Pi** |
+| **Inferenz (Produktion)** | **`RPI_deploy.py`** | **Raspberry Pi** |
+
+### Übergabe PC → Raspberry Pi
+
+Nach dem Training und der Hailo-Kompilierung müssen folgende Dateien auf den Pi übertragen werden:
+
+```
+models/active_hef/<modell>.hef    ← kompiliertes Hailo-Modell
+assets/                           ← Schild-PNGs für die Anzeige
+```
+
+Alle anderen Dateien (Datensatz, Trainings-Checkpoints, ONNX-Modell, Kalibrierungsbilder) verbleiben auf dem Windows-PC.
+
+---
+
 ## Projektstruktur
 
 ```
 hailo-speed-sign-detector/
 │
+│  ── Windows (Entwicklung & Training) ──────────────────────
+├── setup_venv.bat                  ← Trainingsumgebung einrichten
 ├── tempolimits.yaml                ← Zentrale Konfig: Klassen + Datenpfade
 │
 ├── split_dataset.py                ← Schritt 1: Rohdaten aufteilen (train/val)
 ├── train_yolo.py                   ← Schritt 2: Training + ONNX-Export
 ├── generate_universal_calib.py     ← Schritt 3: Kalibrierungsset für Hailo DFC
 │
-├── compare_models.py               ← Hilfstool: Trainingsläufe vergleichen
-├── setup_venv.bat                  ← Windows: Trainingsumgebung einrichten
+├── PC_application.py               ← Modell auf dem PC testen (Webcam / Screen)
+├── compare_models.py               ← Trainingsläufe vergleichen
 │
-├── RPI_debug.py                    ← Raspberry Pi: Echtzeit-Inferenz + Web-UI (Entwicklung)
-├── RPI_deploy.py                   ← Raspberry Pi: Vollbild-GUI, kein Webserver (Produktion)
-└── PC_application.py               ← Windows-PC: Testen mit Webcam / Bildschirm
+│  ── Raspberry Pi (Inferenz) ────────────────────────────────
+├── RPI_debug.py                    ← Echtzeit-Inferenz + Web-UI (Entwicklung)
+└── RPI_deploy.py                   ← Vollbild-GUI, kein Webserver (Produktion)
 ```
 
 ---

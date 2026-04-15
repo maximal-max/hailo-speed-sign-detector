@@ -350,13 +350,15 @@ class SpeedSignDetector:
         # Modell-Parameter aus Mapping ableiten
         params = _MODEL_PARAMS.get(self.model_w)
         if params:
-            global CONFIDENCE_THRESHOLD, INFER_EVERY_N, DEBOUNCE_COUNT
-            CONFIDENCE_THRESHOLD = params["conf_thresh"]
-            INFER_EVERY_N        = params["infer_every"]
-            DEBOUNCE_COUNT       = params["debounce"]
+            self.conf_threshold = params["conf_thresh"]
+            self.infer_every_n  = params["infer_every"]
+            self.debounce_count = params["debounce"]
         else:
             _print_line(f"[WARN] Kein Param-Mapping fuer {self.model_w}px -- "
                         f"Defaults beibehalten.")
+            self.conf_threshold = CONFIDENCE_THRESHOLD
+            self.infer_every_n  = INFER_EVERY_N
+            self.debounce_count = DEBOUNCE_COUNT
 
     def close(self) -> None:
         try:
@@ -412,7 +414,7 @@ class SpeedSignDetector:
                     float(det[0]), float(det[1]),
                     float(det[2]), float(det[3]), float(det[4])
                 )
-                if score < CONFIDENCE_THRESHOLD:
+                if score < self.conf_threshold:
                     continue
                 x1_l = x1_n * self.model_w;  y1_l = y1_n * self.model_h
                 x2_l = x2_n * self.model_w;  y2_l = y2_n * self.model_h
@@ -639,11 +641,13 @@ def _draw_no_limit_screen(frame: np.ndarray, screen_w: int, screen_h: int) -> No
 
 
 def _draw_sign_png(frame: np.ndarray, limit: int,
-                   screen_w: int, screen_h: int) -> None:
+                   screen_w: int, screen_h: int,
+                   use_blue_circle: bool = False) -> None:
     """
     Zeichnet das Schild-PNG zentriert auf dem (schwarzen) Frame.
     Nutzt Alpha-Compositing wenn PNG einen Alpha-Kanal hat.
     Fallback: gezeichneter Kreis mit Zahl.
+    use_blue_circle: True für blaue Schilder (z.B. Autobahn), False für rote Temposchilder.
     """
     size  = int(screen_h * SIGN_DISPLAY_FRACTION)
     size  = size - (size % 2)   # gerade Zahl für sauberes Centering
@@ -670,7 +674,7 @@ def _draw_sign_png(frame: np.ndarray, limit: int,
         radius = size // 2
         ring_w = max(4, radius // 7)
 
-        ring_color = (220, 80, 0) if False else (0, 0, 220)  # rot für Tempolimits
+        ring_color = (0, 0, 220) if use_blue_circle else (220, 80, 0)  # blau für Sonderschilder, rot für Tempolimits
         cv2.circle(frame, (cx, cy), radius, ring_color, -1)
         cv2.circle(frame, (cx, cy), radius - ring_w, (255, 255, 255), -1)
 
@@ -722,7 +726,7 @@ def build_gui_frame(state: SpeedStateMachine,
     if limit is None:
         _draw_no_limit_screen(frame, screen_w, screen_h)
     else:
-        _draw_sign_png(frame, limit, screen_w, screen_h)
+        _draw_sign_png(frame, limit, screen_w, screen_h, state.use_blue_circle)
         _draw_debounce_arc(frame, debounce_progress, debounce_total,
                            screen_w, screen_h)
 
@@ -786,7 +790,7 @@ def main() -> None:
     print(f"  Speed Sign Detector  \u00b7  Deploy-Version")
     print(f"  {'=' * 53}")
     print(f"  Modell    : {HEF_PATH.name:<20}  [{detector.model_w}x{detector.model_h} px]")
-    print(f"  Konfidenz : {CONFIDENCE_THRESHOLD}   every={INFER_EVERY_N}   debounce={DEBOUNCE_COUNT}")
+    print(f"  Konfidenz : {detector.conf_threshold}   every={detector.infer_every_n}   debounce={detector.debounce_count}")
     print(f"  Kamera    : {cam_w}x{cam_h} @ {fps} fps  |  ROI-Crop: {ROI_CROP}")
     print(f"{'=' * 57}\n")
 
@@ -850,11 +854,11 @@ def main() -> None:
 
             frame_count += 1
 
-            if debouncer.buffer_size != DEBOUNCE_COUNT:
-                debouncer.resize(DEBOUNCE_COUNT)
+            if debouncer.buffer_size != detector.debounce_count:
+                debouncer.resize(detector.debounce_count)
 
             # Inferenz (jeden N-ten Frame)
-            if frame_count % INFER_EVERY_N == 0:
+            if frame_count % detector.infer_every_n == 0:
                 t_inf = time.perf_counter()
 
                 img_rgb, scale, pad_x, pad_y, roi_offset_y = detector.preprocess(
@@ -883,7 +887,7 @@ def main() -> None:
 
             # GUI-Frame aufbauen und anzeigen
             gui_frame = build_gui_frame(
-                state, debounce_progress, DEBOUNCE_COUNT,
+                state, debounce_progress, detector.debounce_count,
                 screen_w, screen_h, fps_inf, cpu_temp
             )
             cv2.imshow(WIN_NAME, gui_frame)

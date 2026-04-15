@@ -200,6 +200,8 @@ def select_primary(detections, frame_w, frame_h):
     if not detections:   return None
     if len(detections) == 1: return detections[0]
     total = frame_w * frame_h
+    if total <= 0:
+        return detections[0]
     def score(d):
         x1,y1,x2,y2 = d["bbox"]
         return d["conf"] * ((x2-x1)*(y2-y1)) / total
