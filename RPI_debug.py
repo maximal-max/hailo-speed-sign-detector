@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-speed_sign_detector.py
+RPI_debug.py
 ======================
 Raspberry Pi 5 + Hailo-8 + Camera Module 3 (imx708) -- HailoRT 4.20.0
 
-Aufruf:    /usr/bin/python3 speed_sign_detector.py
+Aufruf:    /usr/bin/python3 RPI_debug.py
 Stream:    http://localhost:8080
 
 =================================================

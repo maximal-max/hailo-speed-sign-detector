@@ -45,7 +45,8 @@ hailo-speed-sign-detector/
 ├── compare_models.py               ← Hilfstool: Trainingsläufe vergleichen
 ├── setup_venv.bat                  ← Windows: Trainingsumgebung einrichten
 │
-├── RPI_application.py              ← Raspberry Pi: Echtzeit-Inferenz + Web-UI
+├── RPI_debug.py                    ← Raspberry Pi: Echtzeit-Inferenz + Web-UI (Entwicklung)
+├── RPI_deploy.py                   ← Raspberry Pi: Vollbild-GUI, kein Webserver (Produktion)
 └── PC_application.py               ← Windows-PC: Testen mit Webcam / Bildschirm
 ```
 
@@ -135,11 +136,21 @@ Lädt das trainierte `best.pt`-Modell und zeigt eine Echtzeit-Inferenz auf Webca
 
 ### 8. Inferenz auf dem Raspberry Pi 5
 
+**Debug-Modus** (Entwicklung, Web-UI mit Live-Stream):
+
 ```bash
-/usr/bin/python3 RPI_application.py
+/usr/bin/python3 RPI_debug.py
 ```
 
 Web-UI: `http://<PI-IP>:8080`
+
+**Deploy-Modus** (Produktion, Vollbild-GUI ohne Webserver):
+
+```bash
+/usr/bin/python3 RPI_deploy.py
+```
+
+Zeigt nur das erkannte Temposchild als PNG im Vollbild — kein Kamerabild, keine Bounding Boxes, kein HTTP-Server. Startet mit einem 10-Sekunden-Disclaimer.
 
 ---
 
@@ -194,18 +205,22 @@ Ermöglicht das vollständige Testen des trainierten Modells auf einem Windows-P
 
 ### Identische Logik
 
-`PC_application.py` verwendet dieselbe `SpeedStateMachine` und denselben `TemporalDebouncer` wie `RPI_application.py` — Ergebnisse sind direkt vergleichbar.
+`PC_application.py` verwendet dieselbe `SpeedStateMachine` und denselben `TemporalDebouncer` wie `RPI_debug.py` und `RPI_deploy.py` — Ergebnisse sind direkt vergleichbar.
 
 ---
 
-## Echtzeit-Anwendung (`RPI_application.py`)
+## Debug-Anwendung (`RPI_debug.py`)
 
-### Konfiguration
+Entwicklungs- und Testversion mit vollem Web-UI. Nachfolger der früheren `RPI_application.py`.
 
-Am Anfang der Datei eine Zeile ändern:
+### Modell-Erkennung
 
-```python
-MODEL_SIZE = 640   # 512 | 640 | 800  →  lädt <MODEL_SIZE>px.hef
+Das `.hef`-Modell wird automatisch aus `models/active_hef/` geladen — keine manuelle Pfad-Konfiguration nötig. Liegt genau eine `.hef`-Datei in diesem Ordner, wird sie verwendet. Bei mehreren Dateien wird die erste (alphabetisch) gewählt und eine Warnung ausgegeben.
+
+```
+models/
+└── active_hef/
+    └── 640px.hef    ← wird automatisch erkannt
 ```
 
 ### Kamera-Modi
@@ -222,7 +237,7 @@ MODEL_SIZE = 640   # 512 | 640 | 800  →  lädt <MODEL_SIZE>px.hef
 - **Konfidenz-Schwelle** per Slider (Standard: 45%)
 - **Infer every N** — nur jeden N-ten Frame inferieren (1–6)
 - **Debounce** — benötigte Treffer für eine Bestätigung (1–8)
-- **KI-Auge** — streamt den exakten 640×640-Tensor der an den Chip geht
+- **KI-Auge** — streamt den exakten Eingabe-Tensor, der an den Chip geht (inkl. Letterboxing)
 - **ROI-Crop** — schneidet die unteren 30% ab (Motorhaube ausblenden)
 - **JSON-Status** unter `/status`
 
@@ -236,6 +251,34 @@ Die `SpeedStateMachine` verwaltet neben dem aktuellen Limit einen internen Fahrk
 ### Temporal Debouncer
 
 Einzelne verlorene Frames (Hailo-Flackern) werden toleriert. Bei `buffer_size=5` und `required_hits=3` reicht das Muster `[50, 50, None, 50, 50]` für eine Bestätigung.
+
+---
+
+## Deploy-Anwendung (`RPI_deploy.py`)
+
+Produktionsversion für den Fahrzeugeinsatz — kein Webserver, kein Kamerabild, kein Netzwerk-Stream.
+
+### Konzept
+
+Das Skript zeigt ausschließlich das erkannte Temposchild als PNG im Vollbild an. Kein Kamerabild, keine Bounding Boxes, keine Debug-Overlays. Gedacht für den montierten Betrieb an einem Display im Fahrzeug.
+
+### Konfiguration (am Dateianfang)
+
+```python
+CONFIDENCE_THRESHOLD = 0.45   # Mindest-Konfidenz
+CAMERA_MODE    = "1280x720@60"
+ROI_CROP       = False         # untere 30% abschneiden (Fahrzeug-Montage)
+INFER_EVERY_N  = 2             # jeden N-ten Frame inferieren
+DEBOUNCE_COUNT = 3             # Treffer bis zur Bestätigung
+FULLSCREEN     = True          # False = Fenster 800×480
+DISCLAIMER_SECONDS = 10        # Dauer des Start-Disclaimers
+```
+
+Das Modell wird ebenfalls automatisch aus `models/active_hef/` geladen (identische Logik wie `RPI_debug.py`).
+
+### Start-Disclaimer
+
+Beim Start erscheint für 10 Sekunden ein Hinweistext mit Countdown-Balken. Erst danach beginnt die Echtzeit-Erkennung.
 
 ---
 
@@ -268,7 +311,7 @@ RANK  NAME              MODEL       RES   EPOCH  mAP50   mAP50-95   BEWERTUNG
 Der Export erfolgt zwingend mit `opset=11`, `half=False` (FP32) und `dynamic=False` (statische Shapes). Direkt nach dem Export prüft `onnx.checker.check_model()` den Graph — ein fehlerhafter Graph führt im DFC zu kryptischen Fehlermeldungen ohne Zeilenangabe.
 
 **BGR/RGB auf dem Pi**
-Picamera2 liefert trotz `BGR888`-Konfiguration intern RGB-Daten. `CameraStream` konvertiert jeden Frame sofort nach `capture_array()` zu echtem BGR (`cv2.COLOR_RGB2BGR`). `preprocess()` konvertiert dann BGR→RGB bevor der Tensor an den Hailo-Chip geht. Das `.npy`-Kalibrierungsset ist ebenfalls in RGB gespeichert — konsistent mit dem was der Chip zur Laufzeit sieht.
+Picamera2 liefert trotz `BGR888`-Konfiguration intern RGB-Daten. `CameraStream` konvertiert jeden Frame sofort nach `capture_array()` zu echtem BGR (`cv2.COLOR_RGB2BGR`). `preprocess()` konvertiert dann BGR→RGB bevor der Tensor an den Hailo-Chip geht. Das `.npy`-Kalibrierungsset ist ebenfalls in RGB gespeichert — konsistent mit dem, was der Chip zur Laufzeit sieht. Diese Pipeline gilt identisch für `RPI_debug.py` und `RPI_deploy.py`.
 
 **Reproduzierbarkeit**
 `set_seed(42)` setzt Python-, NumPy-, PyTorch- und CUDA-Zufallsgeneratoren. `torch.backends.cudnn.deterministic = True` macht das Training vollständig reproduzierbar (auf Kosten von ~5–10% Trainingsgeschwindigkeit).
