@@ -72,7 +72,7 @@ echo 3) YOLO ^& Vision Toolkit
 echo ================================
 REM opencv-python (mit GUI-Support) benoetigt fuer PC_application.py (imshow, namedWindow)
 REM NICHT opencv-python-headless verwenden - das unterstuetzt keine Fenster!
-pip install ultralytics opencv-python==4.10.0.84 albumentations==1.4.18 lapx==0.5.11.post1 seaborn==0.13.2 pillow==11.0.0
+pip install ultralytics opencv-python==4.10.0.84 "albumentations>=2.0.8" lapx==0.5.11.post1 seaborn==0.13.2 pillow==11.0.0
 if errorlevel 1 ( echo FEHLER bei YOLO/Vision Toolkit & exit /b 1 )
 
 echo.

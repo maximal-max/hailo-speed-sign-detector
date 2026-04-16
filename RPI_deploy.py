@@ -28,6 +28,9 @@ import cv2
 from picamera2 import Picamera2
 from picamera2.devices.hailo import Hailo
 
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 
 # ================================================================
 #  KONFIGURATION  -- hier alle Parameter anpassen
@@ -132,7 +135,7 @@ def _get_screen_resolution() -> tuple[int, int]:
     except Exception:
         pass
 
-    _print_line("[WARN] Auflösung nicht erkannt -- Fallback 1920x1080")
+    _print_line("[WARN] Aufloesung nicht erkannt -- Fallback 1920x1080")
     return 1920, 1080
 
 
@@ -223,7 +226,7 @@ SIGN_CLASSES = {
 
 
 # ================================================================
-#  SPEED-SIGN PNG-CACHE  (identisch zu RPI_application.py)
+#  SPEED-SIGN PNG-CACHE
 # ================================================================
 
 SPEED_SIGN_FOLDER = Path(__file__).resolve().parent / "datasets" / "application_images_dataset"
@@ -271,7 +274,7 @@ def _load_sign_png_bgra(limit: int, size: int) -> Optional[np.ndarray]:
 
 
 # ================================================================
-#  STATE MACHINE  (identisch zu RPI_application.py)
+#  STATE MACHINE
 # ================================================================
 
 class SpeedStateMachine:
@@ -313,7 +316,7 @@ class SpeedStateMachine:
 
 
 # ================================================================
-#  DETEKTION AUSWAEHLEN  (identisch zu RPI_application.py)
+#  DETEKTION AUSWAEHLEN
 # ================================================================
 
 def select_primary_detection(detections: list,
@@ -334,7 +337,7 @@ def select_primary_detection(detections: list,
 
 
 # ================================================================
-#  HAILO INFERENZ  (identisch zu RPI_application.py)
+#  HAILO INFERENZ
 # ================================================================
 
 class SpeedSignDetector:
@@ -371,11 +374,21 @@ class SpeedSignDetector:
 
     def preprocess(self, frame_bgr: np.ndarray, cam_w: int, cam_h: int,
                    apply_roi_crop: bool = False):
+        """
+        Letterbox-Skalierung auf Modell-Eingabegröße und BGR→RGB-Konvertierung.
+
+        Bei apply_roi_crop=True werden die unteren (1 - ROI_TOP_FRACTION)*100 %
+        abgeschnitten. Da der Crop vom unteren Rand erfolgt, bleibt der Y-Offset
+        für die BBox-Rückprojektion 0.
+
+        Rückgabe: (img_rgb, scale, pad_x, pad_y, roi_offset_y)
+        """
         roi_offset_y = 0
         if apply_roi_crop:
             h_orig    = frame_bgr.shape[0]
             roi_h     = int(h_orig * ROI_TOP_FRACTION)
             frame_bgr = frame_bgr[:roi_h, :]
+            # Bottom-Crop: Bild beginnt weiterhin bei y=0, kein Y-Versatz nötig.
             roi_offset_y = 0
         h, w  = frame_bgr.shape[:2]
         scale = min(self.model_w / w, self.model_h / h)
@@ -388,8 +401,9 @@ class SpeedSignDetector:
             resized,
             pad_y, self.model_h - nh - pad_y,
             pad_x, self.model_w - nw - pad_x,
-            cv2.BORDER_CONSTANT, value=(114, 114, 114)
+            cv2.BORDER_CONSTANT, value=(114, 114, 114)   # Letterbox-Grau (YOLOv11-Standard)
         )
+        # BGR→RGB: Hailo-Modell wurde mit RGB-Daten trainiert.
         img_rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
         return img_rgb, scale, pad_x, pad_y, roi_offset_y
 
@@ -399,6 +413,14 @@ class SpeedSignDetector:
     def postprocess(self, result, orig_w: int, orig_h: int,
                     scale: float, pad_x: int, pad_y: int,
                     roi_offset_y: int = 0) -> list:
+        """
+        Dekodiert Hailo-Output zu einer Liste von Detektionen.
+
+        Koordinaten werden aus dem normierten Modell-Raum zurück in den
+        Kamera-Frame projiziert. self.model_w/h (statt globaler Konstanten)
+        stellt sicher, dass die Projektion bei nicht-quadratischen Modellen
+        korrekt bleibt. roi_offset_y korrigiert Y-Koordinaten nach ROI-Crop.
+        """
         detections = []
         if not isinstance(result, list):
             return detections
@@ -416,12 +438,14 @@ class SpeedSignDetector:
                 )
                 if score < self.conf_threshold:
                     continue
+                # Normierte Koordinaten → Modell-Pixel → Kamera-Pixel
                 x1_l = x1_n * self.model_w;  y1_l = y1_n * self.model_h
                 x2_l = x2_n * self.model_w;  y2_l = y2_n * self.model_h
                 rx1 = int(max(0, min((x1_l - pad_x) / scale, orig_w)))
                 ry1 = int(max(0, min((y1_l - pad_y) / scale, orig_h)))
                 rx2 = int(max(0, min((x2_l - pad_x) / scale, orig_w)))
                 ry2 = int(max(0, min((y2_l - pad_y) / scale, orig_h)))
+                # Y-Korrektur nach ROI-Crop (0 bei Bottom-Crop, >0 bei Top-Crop)
                 ry1 += roi_offset_y
                 ry2 += roi_offset_y
                 if rx2 <= rx1 or ry2 <= ry1:
@@ -435,7 +459,7 @@ class SpeedSignDetector:
 
 
 # ================================================================
-#  TEMPORAL DEBOUNCER  (identisch zu RPI_application.py)
+#  TEMPORAL DEBOUNCER
 # ================================================================
 
 class TemporalDebouncer:
@@ -482,7 +506,7 @@ def _build_camera_controls(frame_us: int) -> dict:
 
 
 # ================================================================
-#  CAMERA STREAM THREAD  (identisch zu RPI_application.py)
+#  CAMERA STREAM THREAD
 # ================================================================
 
 class CameraStream:
@@ -797,7 +821,7 @@ def main() -> None:
     # --- Bildschirmauflösung ermitteln (vor Fenster-Öffnung) ---
     if FULLSCREEN:
         screen_w, screen_h = _get_screen_resolution()
-        _print_line(f"[Display] Auflösung: {screen_w}x{screen_h} (Vollbild)")
+        _print_line(f"[Display] Aufloesung: {screen_w}x{screen_h} (Vollbild)")
     else:
         screen_w, screen_h = WINDOW_W, WINDOW_H
 
@@ -811,7 +835,7 @@ def main() -> None:
                               cv2.WINDOW_FULLSCREEN)
 
     # --- Disclaimer anzeigen ---
-    print(f"[Disclaimer] Zeige Hinweis für {DISCLAIMER_SECONDS} Sekunden ...")
+    print(f"[Disclaimer] Zeige Hinweis fuer {DISCLAIMER_SECONDS} Sekunden ...")
     _show_disclaimer(WIN_NAME, screen_w, screen_h)
 
     # --- Haupt-Erkennungsschleife ---

@@ -63,13 +63,13 @@ USER_YAML_FILE = "tempolimits.yaml"
 # DRY-RUN-MODUS
 # True  → Schneller Funktionstest: 64 Bilder, 1 Epoche, keine Augmentierungs-Vervielfachung.
 # False → Echtes Training mit allen Bildern und vollen Epochen.
-DRY_RUN = False
+DRY_RUN = True
 
 # Seed für vollständige Reproduzierbarkeit (Training, Augmentierung, Shuffle)
 SEED = 42
 
 # --- Modell & Training ---
-NAME       = "640px_YOLOv11m"   # Unterordner-Name in RUNS_DIR
+NAME       = "dry_640px_YOLOv11m"   # Unterordner-Name in RUNS_DIR
 MODEL_BASE = "yolo11m.pt"      # Basis-Gewichte (werden automatisch heruntergeladen)
 IMG_SIZE   = 640                # Eingabegröße in Pixel (quadratisch); muss mit HEF übereinstimmen
 EPOCHS     = 1   if DRY_RUN else 200
@@ -105,9 +105,19 @@ AUG_ROTATION  = (-4, 4)    # Leichte Gesamtdrehung in Grad
 AUG_GEOM_PROB = 0.6         # Wahrscheinlichkeit pro Bild
 
 # 3. SENSOR-RAUSCHEN (simuliert High-ISO / Nacht / Regen)
-#    Aggressiv: (50, 200) | Mittel: (30, 100) | Sanft: (10, 50)
-AUG_NOISE_VAR  = (40, 150)  # Varianz des Gauß-Rauschens
-AUG_NOISE_PROB = 0.6         # Wahrscheinlichkeit pro Bild
+#    Albumentations >=2.0 nutzt std_range: Std-Abweichung normiert auf [0.0, 1.0],
+#    wobei 1.0 = Pixelmax (255 bei uint8).
+#    Umrechnung: std_norm = sqrt(var_pixel) / 255
+#      → var=40  → std=6.3  → normiert≈0.025  (≈ IMX708 bei ISO 1600)
+#      → var=150 → std=12.2 → normiert≈0.048  (≈ IMX708 bei ISO 6400)
+#    Aggressiv: (0.035, 0.056) | Mittel: (0.022, 0.039) | Sanft: (0.012, 0.028)
+AUG_NOISE_STD  = (0.025, 0.048)  # Std-Abweichung normiert; entspricht ISO 1600–6400 am IMX708
+AUG_NOISE_PROB = 0.6              # Wahrscheinlichkeit pro Bild
+
+# 4. NACHT-/MONOCHROM-SIMULATION (IMX708 in schlechten Lichtverhältnissen)
+#    Geringe Wahrscheinlichkeit – nur für Diversität des Trainingssets.
+#    num_output_channels=3 zwingend: YOLO erwartet 3-Kanal-Tensoren.
+AUG_GRAY_PROB = 0.08              # 8% der Bilder werden in Graustufen konvertiert
 
 
 # ==============================================================================
@@ -187,12 +197,24 @@ def pipeline_train() -> A.Compose:
     Reihenfolge der Transformationen ist bewusst gewählt:
       1. Motion Blur     → simuliert Bewegungsunschärfe durch Fahrtgeschwindigkeit
       2. Geometrie       → simuliert Rolling-Shutter-Verzerrung und Kameravibrationen
-      3. Sensor-Rauschen → simuliert High-ISO / schlechte Lichtverhältnisse
-      4. Helligkeit      → allgemeine Lichtschwankungen (Tunnel, Gegenlicht)
-      5. Letterbox       → auf IMG_SIZE skalieren ohne Seitenverhältnis zu verzerren
+      3. Nacht/Mono      → simuliert IMX708 in schlechten Lichtverhältnissen (selten)
+      4. Sensor-Rauschen → simuliert High-ISO / schlechte Lichtverhältnisse
+      5. Helligkeit      → allgemeine Lichtschwankungen (Tunnel, Gegenlicht)
+      6. Letterbox       → auf IMG_SIZE skalieren ohne Seitenverhältnis zu verzerren
 
     Alle geometrischen Transforms laufen VOR dem Resize, da Albumentations
     die Bounding-Boxes dabei automatisch mitverschiebt.
+
+    BboxParams:
+      min_visibility=0.1  → Box wird behalten, solange ≥10% ihrer Fläche sichtbar ist.
+                            Bewusst niedrig: Schilder bei 150-200m sind winzig;
+                            "partial visibility"-Samples verbessern die Robustheit.
+                            0.3 wäre zu aggressiv und würde Randschilder nach Affine
+                            systematisch verwerfen.
+      check_each_transform=True → Albumentations 2.0: BBox-Validierung nach jedem
+                            einzelnen Transform, nicht erst am Ende. Verhindert,
+                            dass ungültige Zwischenzustände (z.B. negative Breite
+                            nach Affine) stillschweigend propagiert werden.
     """
     return A.Compose([
         # 1. Bewegungsunschärfe: entweder gerichteter Motion-Blur oder isotroper Gauss-Blur
@@ -211,25 +233,40 @@ def pipeline_train() -> A.Compose:
             ),
         ], p=AUG_GEOM_PROB),
 
-        # 3. Sensor-Rauschen: ISO-Rauschen oder Gauß-Rauschen
+        # 3. Nacht-/Monochrom-Simulation: IMX708 bei sehr schlechtem Licht
+        #    num_output_channels=3: YOLO erwartet 3-Kanal-Tensoren (RGB), kein Grauwert-Tensor.
+        #    Position nach Geometrie, vor Rauschen: Noise wird dann realistisch auf dem
+        #    bereits entsättigten Bild addiert (so wie ein echter Nacht-Sensor arbeitet).
+        A.ToGray(num_output_channels=3, p=AUG_GRAY_PROB),
+
+        # 4. Sensor-Rauschen: Gauß-Rauschen oder Farb-/Helligkeitsjitter
+        #    ISONoise wurde in Albumentations 2.0 entfernt → HueSaturationValue
+        #    ersetzt den Farbrauschen-Anteil von ISONoise.
         A.OneOf([
-            A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=0.5),
-            A.GaussNoise(var_limit=AUG_NOISE_VAR, p=0.5),
+            A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=20, val_shift_limit=20, p=0.5),
+            A.GaussNoise(std_range=AUG_NOISE_STD, p=0.5),
         ], p=AUG_NOISE_PROB),
 
-        # 4. Helligkeits- und Kontrastanpassung
+        # 5. Helligkeits- und Kontrastanpassung
         A.RandomBrightnessContrast(p=0.5),
 
-        # 5. Letterbox-Resize: Seitenverhältnis bleibt erhalten, Rest wird mit Wert 114 aufgefüllt.
-        #    WICHTIG: Dieser Wert (114) muss identisch zur Inferenz-Pipeline auf dem Pi sein.
+        # 6. Letterbox-Resize: Seitenverhältnis bleibt erhalten, Rest wird mit Wert 114 aufgefüllt.
+        #    114 = YOLOv11-Standard (ultralytics/utils/ops.py letterbox()).
+        #    MUSS identisch zu pipeline_val_clean() und RPI_application.py sein,
+        #    da dieser Wert die Basis für das Hailo-Kalibrierungsset bildet.
         A.LongestMaxSize(max_size=IMG_SIZE),
         A.PadIfNeeded(
             min_height=IMG_SIZE,
             min_width=IMG_SIZE,
             border_mode=cv2.BORDER_CONSTANT,
-            value=114
+            fill=114
         ),
-    ], bbox_params=A.BboxParams(format='yolo', label_fields=['cls']))
+    ], bbox_params=A.BboxParams(
+        format='yolo',
+        label_fields=['cls'],
+        min_visibility=0.1,        # Box behalten wenn ≥10% sichtbar (wichtig für Fernschilder)
+        check_each_transform=True, # v2.0: BBox-Validierung nach jedem Transform-Schritt
+    ))
 
 
 def pipeline_val_clean() -> A.Compose:
@@ -251,9 +288,14 @@ def pipeline_val_clean() -> A.Compose:
             min_height=IMG_SIZE,
             min_width=IMG_SIZE,
             border_mode=cv2.BORDER_CONSTANT,
-            value=114
+            fill=114
         ),
-    ], bbox_params=A.BboxParams(format='yolo', label_fields=['cls']))
+    ], bbox_params=A.BboxParams(
+        format='yolo',
+        label_fields=['cls'],
+        min_visibility=0.1,        # Konsistent mit pipeline_train(); Val-Boxes werden nicht getrimmt
+        check_each_transform=True, # v2.0: BBox-Validierung nach jedem Transform-Schritt
+    ))
 
 
 # ==============================================================================

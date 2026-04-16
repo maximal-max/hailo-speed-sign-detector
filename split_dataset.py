@@ -1,19 +1,24 @@
 """
 ==============================================================================
-YOLO Datensatz-Splitter (Central Config Edition)
+split_dataset.py  —  Datensatz-Splitter (Stratified)
 ==============================================================================
-Zweck: Bereitet Rohdaten (GTSDB etc.) für das Training vor.
 
-WAS TUT DIESES SKRIPT?
-1. Scannt deinen Quellordner (z.B. 'Tempolimits_Datenbank') nach Bildern & Labels.
-2. Verteilt Daten strategisch (Stratified Split) in 'dataset/images' und 'dataset/labels'.
-3. Trennt Konfiguration von Daten: Es wird KEINE .yaml kopiert!
-   (Das Training nutzt stattdessen die zentrale 'tempolimits.yaml' im Projekt-Root).
+Bereitet Rohdaten für das YOLO-Training vor.
 
-FEATURES:
-- Stratified Split: Garantiert, dass seltene Schilder auch im Validierungs-Set landen.
-- Background Handling: Mischt leere Bilder (Negative Samples) fair unter.
-- Clean Slate: Löscht den alten 'dataset' Ordner vor jedem Lauf komplett.
+SCHRITTE:
+  1. Bilder und Labels aus SOURCE_DIR einlesen (rekursiv, alle Bildformate).
+  2. Stratifizierter Split nach Klasse — seltene Schilder landen garantiert
+     in beiden Splits (train + val).
+  3. Hintergrundbilder (leere Labels / Negative Samples) werden proportional
+     auf die Splits verteilt.
+  4. Ergebnis in TARGET_DIR kopieren (YOLO-Ordnerstruktur: images/ + labels/).
+
+WICHTIG:
+  Keine .yaml wird kopiert — das Training liest die zentrale tempolimits.yaml
+  aus dem Projekt-Root direkt.
+
+VERWENDUNG:
+  python split_dataset.py
 
 ==============================================================================
 """
@@ -24,37 +29,41 @@ from pathlib import Path
 from collections import Counter, defaultdict
 from tqdm import tqdm
 
-# -----------------------------
-# CONFIG
-# -----------------------------
-SOURCE_DIR = Path("datasets/stable_tempo_dataset")    
-TARGET_DIR = Path("datasets/sorted_dataset")          
+# ==============================================================================
+# KONFIGURATION
+# ==============================================================================
 
-IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".bmp", ".webp"] 
-LABEL_EXT = ".txt"
+SOURCE_DIR = Path("datasets/stable_tempo_dataset")   # Rohdaten-Eingabe
+TARGET_DIR = Path("datasets/sorted_dataset")          # Split-Ausgabe (wird neu erstellt)
+
+IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".bmp", ".webp"]
+LABEL_EXT  = ".txt"
 
 SPLITS = {
     "train": 0.8,
     "val":   0.2,
-    "test":  0.0
+    "test":  0.0,    # Test-Split deaktiviert
 }
 
 SEED = 42
 random.seed(SEED)
 
-# -----------------------------
-# HELPER: LABEL FINDER
-# -----------------------------
+# ==============================================================================
+# HILFSFUNKTIONEN
+# ==============================================================================
+
 def get_label_path(img_path):
     """
-    Sucht intelligent nach der passenden .txt Datei.
+    Sucht die zugehörige YOLO-Label-Datei zu einem Bild.
+
+    Prüft zwei Strukturen:
+      1. Side-by-Side:     bild.jpg → bild.txt (gleicher Ordner)
+      2. Parallel-Ordner:  images/bild.jpg → labels/bild.txt
     """
-    # 1. Versuch: Side-by-Side
     lbl = img_path.with_suffix(LABEL_EXT)
     if lbl.exists():
         return lbl
-    
-    # 2. Versuch: Parallel-Ordner "labels"
+
     try:
         if img_path.parent.name == "images":
             lbl_parallel = img_path.parent.parent / "labels" / f"{img_path.stem}{LABEL_EXT}"
@@ -65,9 +74,6 @@ def get_label_path(img_path):
 
     return None
 
-# -----------------------------
-# UTILS
-# -----------------------------
 def cleanup_target():
     if TARGET_DIR.exists():
         print(f"🗑️  Bereinige Zielordner: {TARGET_DIR}")
@@ -127,9 +133,10 @@ def gather_data():
     
     return fg_class_map, bg_files, file_contents
 
-# -----------------------------
-# CORE LOGIC: Stratified Split
-# -----------------------------
+# ==============================================================================
+# SPLIT-LOGIK
+# ==============================================================================
+
 def calculate_splits(fg_class_map, bg_files):
     print("\n⚖️  Berechne balancierten Split ...")
     
@@ -179,9 +186,10 @@ def calculate_splits(fg_class_map, bg_files):
 
     return final_sets
 
-# -----------------------------
-# COPY & FINISH
-# -----------------------------
+# ==============================================================================
+# DATEIEN KOPIEREN & BERICHT
+# ==============================================================================
+
 def copy_files(final_sets, file_contents):
     print("\n📥 Kopiere Dateien ...")
     stats = {s: Counter() for s in SPLITS.keys()}
@@ -235,9 +243,6 @@ def print_report(stats, bg_count):
     if SPLITS["test"] == 0:
         print("\nℹ️  HINWEIS: Test-Split ist deaktiviert (0%).")
 
-# -----------------------------
-# RUN
-# -----------------------------
 if __name__ == "__main__":
     cleanup_target()
     fg_map, bg_files, file_contents = gather_data()

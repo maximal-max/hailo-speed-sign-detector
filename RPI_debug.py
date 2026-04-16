@@ -1,76 +1,62 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-RPI_debug.py
-======================
-Raspberry Pi 5 + Hailo-8 + Camera Module 3 (imx708) -- HailoRT 4.20.0
+==============================================================================
+RPI_debug.py  —  Speed Sign Detector  |  Debug / Entwicklung
+==============================================================================
 
-Aufruf:    /usr/bin/python3 RPI_debug.py
-Stream:    http://localhost:8080
+Raspberry Pi 5 + Hailo-8 + Camera Module 3 (IMX708)  —  HailoRT 4.20.0
 
-=================================================
-DYNAMISCHES MODELL-SWITCHING
-=================================================
-  MODEL_SIZE  steuert alles:
-    MODEL_SIZE = 640  ->  640px.hef  (Standard, ausgewogen)
-    MODEL_SIZE = 512  ->  512px.hef  (schneller, etwas weniger Genauigkeit)
-    MODEL_SIZE = 800  ->  800px.hef  (groesser, mehr Genauigkeit, mehr CPU)
-  HEF_PATH und INPUT_SIZE werden automatisch abgeleitet.
+Aufruf:  /usr/bin/python3 RPI_debug.py
+Stream:  http://localhost:8080
 
-=================================================
-BGR/RGB-FARBPIPELINE (bereinigt, stabil)
-=================================================
+==============================================================================
+MODELL-ERKENNUNG
+==============================================================================
+  Das .hef-Modell wird automatisch aus models/active_hef/ geladen.
+  Modell-spezifische Inferenzparameter (Konfidenz, Infer-Every-N, Debounce)
+  werden nach dem Laden der Modell-Eingabeform aus _MODEL_PARAMS abgeleitet.
+
+==============================================================================
+BGR/RGB-FARBPIPELINE
+==============================================================================
   Picamera2 liefert trotz BGR888-Konfiguration intern RGB-Daten.
-  CameraStream-Thread:  capture_array() -> cvtColor(RGB2BGR) -> Puffer
-  preprocess():         BGR-Frame -> opt. ROI-Crop -> cvtColor(BGR2RGB) -> Hailo
+
+  CameraStream-Thread:  capture_array()  →  cvtColor(RGB→BGR)  →  Puffer
+  preprocess():         BGR-Frame  →  opt. ROI-Crop  →  cvtColor(BGR→RGB)  →  Hailo
   _encode_worker():
-    Normal:    BGR-Frame -> resize -> imencode (BGR nativ korrekt)
-    KI-Auge:   RGB-Tensor -> cvtColor(RGB2BGR) -> imencode
+    Normal:   BGR-Frame  →  resize  →  imencode  (BGR nativ korrekt)
+    KI-Auge:  RGB-Tensor →  cvtColor(RGB→BGR)  →  imencode
 
-=================================================
-KI-AUGE (show_ai_eye)
-=================================================
-  Streamt den exakten MODEL_SIZE x MODEL_SIZE RGB-Tensor, der in die
-  Hailo-NPU geht -- inklusive Letterboxing und grauem Padding.
-  Toggle: Web-UI Button oder GET /cmd?ai_eye=1
+==============================================================================
+KI-AUGE  (show_ai_eye)
+==============================================================================
+  Streamt den exakten MODEL_SIZE × MODEL_SIZE RGB-Tensor, der an die
+  Hailo-NPU übergeben wird — inklusive Letterboxing und grauem Padding.
+  Toggle: Web-UI oder GET /cmd?ai_eye=1
 
-=================================================
-ROI-CROP (roi_crop)
-=================================================
-  Schneidet die unteren 30% des Kamera-Frames vor der NPU-Inferenz ab.
-  Nur die oberen 70% (ROI_TOP_FRACTION) werden an die Hailo-NPU gegeben.
-  Die Y-Koordinaten der BBoxen werden im Postprocessing korrigiert.
-  Toggle: Web-UI Button oder GET /cmd?roi=1
-  Default: AUS (Labortest ohne Fahrzeug-Montage).
+==============================================================================
+ROI-CROP  (roi_crop)
+==============================================================================
+  Schneidet die unteren 30 % des Kamera-Frames vor der NPU-Inferenz ab
+  (ROI_TOP_FRACTION = 0.70). Die Y-Koordinaten der BBoxen werden im
+  Postprocessing um den abgeschnittenen Versatz korrigiert.
+  Toggle: Web-UI oder GET /cmd?roi=1  |  Standard: AUS
 
-=================================================
+==============================================================================
 LIMIT-LOGIK
-=================================================
-  Schilder  0-11 (Tempolimit)    -> Limit direkt setzen  (roter Ring)
-  Schild    12   (Spielstrasse)  -> 7 km/h               (blauer Ring)
-  Schild    13   (Ende Spielstr) -> 50 km/h              (roter Ring)
-  Schild    14   (Ortsschild)    -> 50 km/h              (roter Ring)
-  Schild    15   (Ende Orts)     -> 100 km/h             (roter Ring)
-  Schilder 16/17 (Aufhebeschild) -> 30 km/h (innerorts/unbekannt)
-                                    100 km/h (ausserorts)
-  Schild    18   (Autobahn)      -> 130 km/h             (blauer Ring)
-  Schild    19   (Ende Autobahn) -> 100 km/h             (roter Ring)
-  Kontext (innerorts/ausserorts) wird nur intern verwaltet.
+==============================================================================
+  Klassen  0–11  (Tempolimit)    → Limit direkt (roter Ring)
+  Klasse   12    (Spielstrasse)  → 7 km/h       (blauer Ring)
+  Klasse   13    (Ende Spielstr) → 50 km/h      (roter Ring)
+  Klasse   14    (Ortsschild)    → 50 km/h      (roter Ring)
+  Klasse   15    (Ende Orts)     → 100 km/h     (roter Ring)
+  Klassen 16/17  (Aufhebeschild) → 30 km/h (innerorts) / 100 km/h (außerorts)
+  Klasse   18    (Autobahn)      → 130 km/h     (blauer Ring)
+  Klasse   19    (Ende Autobahn) → 100 km/h     (roter Ring)
+  Der Fahrkontext (innerorts / außerorts) wird nur intern verwaltet.
 
-=================================================
-AENDERUNGEN GGU. URSPRUNGSVERSION
-=================================================
-  Fix  1: JPEG-Encoding in Daemon-Thread ausgelagert (Queue, Drop-on-Full).
-  Fix  2: Auto-Exposure aktiviert; ExposureTime als obere Grenze (4 ms).
-  Fix  3: select_primary_detection: Score = conf x area_norm statt Minimum.
-  Fix  4: postprocess() nutzt self.model_w/h statt globaler INPUT_SIZE.
-  Fix  5: CameraStream.stop() wartet mit join() auf Thread-Ende.
-  Fix  6: ROI-Crop zur Laufzeit schaltbar (Web-UI + /cmd?roi=).
-  Fix  7: Runtime-Lock nur einmal pro Loop-Durchlauf (lokaler Cache).
-  Fix  8: Thread-Tod-Erkennung + automatischer Neustart im Main-Loop.
-  Fix  9: Counter-Import auf Modulebene verschoben (war im Hotpath).
-  Fix 10: np.ascontiguousarray nach cvtColor entfernt (war redundant).
-  Fix 11: _stream_running als threading.Event (thread-sicher).
+==============================================================================
 """
 
 import sys
@@ -81,7 +67,7 @@ import threading
 import socketserver
 import http.server
 import subprocess
-from collections import Counter, deque   # Fix 9: Counter auf Modulebene
+from collections import Counter, deque
 from urllib.parse import urlparse, parse_qs
 from typing import Optional
 
@@ -90,6 +76,8 @@ import cv2
 from picamera2 import Picamera2
 from picamera2.devices.hailo import Hailo
 
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 # ================================================================
 #  KONSOLEN-HELPER  (TUI-kompatibel)
@@ -168,8 +156,8 @@ CAMERA_MODES = {
 }
 DEFAULT_MODE = "1280x720@60"
 
-# Fix 6: Anteil des Frames (von oben), der bei aktivem ROI-Crop erhalten bleibt.
-# 0.70 = untere 30% werden abgeschnitten (Motorhaube, irrelevanter Boden).
+# Anteil des Frames (von oben), der bei aktivem ROI-Crop erhalten bleibt.
+# 0.70 = untere 30 % werden abgeschnitten (Motorhaube, irrelevanter Boden).
 ROI_TOP_FRACTION = 0.70
 
 
@@ -199,8 +187,8 @@ _MODEL_PARAMS: dict = {
 #  KAMERA-HARDWARE-PARAMETER
 # ================================================================
 
-# Fix 2: Max-Belichtungszeit auf 4 ms reduziert (war 8 ms).
-# AeEnable=True aktiviert Auto-Exposure; ExposureTime wirkt als obere Grenze.
+# AeEnable=True aktiviert Auto-Exposure-Control des IMX708; ExposureTime=4 ms
+# dient als obere Grenze — längere Zeiten erzeugen bei Autobahnfahrt Motion-Blur.
 MAX_EXPOSURE_US      = 4000
 MAX_ANALOGUE_GAIN    = 8.0
 NOISE_REDUCTION_MODE = 1
@@ -245,7 +233,7 @@ _runtime: dict = {
     "infer_every":  INFER_EVERY_N,
     "debounce":     DEBOUNCE_COUNT,
     "show_ai_eye":  False,    # KI-Auge: streamt NPU-Eingabe-Tensor
-    "roi_crop":     False,    # Fix 6: ROI-Crop (Labortest: Standard AUS)
+    "roi_crop":     False,    # ROI-Crop: Standard AUS (kein Fahrzeug-Montage-Betrieb)
     "_mode_change": False,    # intern: signalisiert Kamera-Neustart
     "hef_name":     "–",      # wird nach SpeedSignDetector.__init__ gesetzt
     "model_res":    "–x–",    # wird nach SpeedSignDetector.__init__ gesetzt
@@ -267,17 +255,17 @@ def set_runtime(key, value):
 
 
 # ================================================================
-#  STREAM-EVENT  (Fix 11: threading.Event statt bool-Flag)
+#  STREAM-EVENT
 # ================================================================
 
-# Wird bei Programmende via _stream_event.clear() signalisiert.
-# MJPEG-Handler und Encode-Worker pruefen _stream_event.is_set().
+# Signalisiert den Shutdown via _stream_event.clear().
+# MJPEG-Handler und Encode-Worker prüfen _stream_event.is_set() vor jedem Schreiben.
 _stream_event = threading.Event()
 _stream_event.set()
 
 
 # ================================================================
-#  ASYNC JPEG ENCODING  (Fix 1)
+#  ASYNC JPEG ENCODING
 # ================================================================
 
 _frame_lock   = threading.Lock()
@@ -289,13 +277,13 @@ def _encode_worker() -> None:
     """
     Daemon-Thread: entnimmt Frames aus _encode_queue und kodiert sie als JPEG.
 
-    Laeuft vollstaendig parallel zum Inferenz-Main-Loop.
-    Der Main-Loop ruft nur noch _encode_queue.put_nowait() auf und kehrt
-    sofort zurueck -- das Encoding blockiert die Inferenz nicht mehr.
+    Läuft vollständig parallel zum Inferenz-Main-Loop. Der Main-Loop ruft
+    nur _encode_queue.put_nowait() auf und kehrt sofort zurück — das Encoding
+    blockiert die Inferenzrate nicht.
 
-    Drop-on-Full-Strategie: Ist die Queue voll (beide Slots belegt), wird
-    der Frame via put_nowait() verworfen (QueueFull). Das ist besser als
-    Blockieren, weil die Inferenz-Rate dadurch nicht leidet.
+    Drop-on-Full: Ist die Queue voll, wird der Frame via put_nowait() verworfen
+    (QueueFull). Das ist besser als Blockieren, weil die Inferenzrate dadurch
+    nicht leidet und der Stream immer den aktuellsten verfügbaren Frame zeigt.
     """
     global _current_jpeg
     while _stream_event.is_set():
@@ -459,19 +447,16 @@ def select_primary_detection(detections: list,
                               cam_w: int,
                               cam_h: int) -> Optional[dict]:
     """
-    Fix 3: Score-basierte Auswahl statt blindem Minimum-Limit.
+    Wählt die relevanteste Detektion anhand eines kombinierten Scores.
 
-    Score = conf x area_norm
-      conf      -- Konfidenz der Detektion (0..1)
-      area_norm -- BBox-Flaeche normiert auf Frame-Flaeche (0..1)
+    Score = conf × area_norm
+      conf      — Konfidenz der Detektion (0..1)
+      area_norm — BBox-Fläche normiert auf Frame-Fläche (0..1)
 
-    Grosse, nah gelegene Schilder erzeugen grosse BBoxen und gewinnen
-    damit gegenueber kleinen, weit entfernten Schildern auch dann,
-    wenn letztere ein niedrigeres Tempolimit anzeigen.
-
-    Die Normierung durch cam_w*cam_h macht den Score aufloesung-
-    unabhaengig: ein Modusaenderung von 720p auf 864p aendert
-    die Schwellenwert-Semantik nicht.
+    Große, nahe Schilder erzeugen große BBoxen und gewinnen gegenüber
+    kleinen, fernen Schildern, auch wenn letztere ein niedrigeres Limit zeigen.
+    Die Normierung durch cam_w × cam_h macht den Score auflösungsunabhängig:
+    ein Moduswechsel von 720p auf 864p ändert die Semantik nicht.
     """
     if not detections:
         return None
@@ -536,21 +521,19 @@ class SpeedSignDetector:
     def preprocess(self, frame_bgr: np.ndarray, cam_w: int, cam_h: int,
                    apply_roi_crop: bool = False):
         """
-        Skaliert den BGR-Frame letterbox-artig auf Modell-Eingabegroesse
-        und konvertiert ihn zu RGB, da Hailo RGB erwartet.
+        Letterbox-Skalierung auf Modell-Eingabegröße und BGR→RGB-Konvertierung.
 
-        Fix  6: Optionaler ROI-Crop vor dem Letterboxing.
-                Bei apply_roi_crop=True werden die unteren (1-ROI_TOP_FRACTION)*100%
-                des Frames abgeschnitten. Da der Crop vom oberen Rand startet
-                (y=0 bleibt y=0), ist der Y-Offset fuer die BBox-Rueckprojektion
-                in diesem Fall 0. Die Infrastruktur (roi_offset_y) ist vorhanden
-                fuer zukuenftige Crop-Varianten (z.B. Top-Crop fuer Himmelabschnitt).
-        Fix 10: np.ascontiguousarray nach cvtColor entfernt -- cvtColor gibt
-                bereits ein C-contiguous Array zurueck.
+        Bei apply_roi_crop=True werden die unteren (1 - ROI_TOP_FRACTION)*100 %
+        des Frames abgeschnitten (Motorhaube). Da der Crop vom unteren Rand
+        erfolgt (y=0 bleibt y=0), ist roi_offset_y = 0. Die Infrastruktur
+        für roi_offset_y bleibt vorhanden für zukünftige Top-Crop-Varianten
+        (z.B. Himmelabschnitt), die einen Y-Versatz erzeugen würden.
 
-        Rueckgabe: (img_rgb, scale, pad_x, pad_y, roi_offset_y)
-          roi_offset_y -- Anzahl abgeschnittener Pixel oben im Original-Frame.
-                          0 bei Top-ROI-Crop (Bottom-Abschnitt aendert y=0 nicht).
+        cv2.cvtColor gibt bereits ein C-contiguous Array zurück;
+        np.ascontiguousarray ist danach redundant und entfällt.
+
+        Rückgabe: (img_rgb, scale, pad_x, pad_y, roi_offset_y)
+          roi_offset_y — abgeschnittene Pixel am oberen Bildrand (0 bei Bottom-Crop).
         """
         roi_offset_y = 0
 
@@ -575,8 +558,7 @@ class SpeedSignDetector:
             pad_x, self.model_w - nw - pad_x,
             cv2.BORDER_CONSTANT, value=(114, 114, 114)
         )
-        # BGR -> RGB: Hailo-Modell wurde mit RGB-Daten trainiert.
-        # Fix 10: np.ascontiguousarray entfernt (cvtColor ist bereits C-contiguous).
+        # BGR→RGB: Hailo-Modell wurde mit RGB-Daten trainiert.
         img_rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
         return img_rgb, scale, pad_x, pad_y, roi_offset_y
 
@@ -589,14 +571,11 @@ class SpeedSignDetector:
         """
         Dekodiert Hailo-Output zu einer Liste von Detektionen.
 
-        Fix 4: self.model_w/h statt globaler INPUT_SIZE-Konstante.
-               Verhindert stille BBox-Fehler bei nicht-quadratischen Modellen
-               oder wenn INPUT_SIZE und tatsaechliche Modell-Dimension divergieren.
-        Fix 6: roi_offset_y wird zu allen Y-Koordinaten addiert.
-               Bei Bottom-Crop (roi_offset_y=0) ist das ein No-Op.
-               Bei einem zukuenftigen Top-Crop wuerde hier der Versatz
-               der abgeschnittenen Zeilen addiert, damit die BBoxen
-               wieder korrekt auf dem Original-Frame sitzen.
+        Koordinaten werden aus dem normierten Modell-Raum zurück in den
+        Kamera-Frame projiziert. self.model_w/h (statt globaler Konstanten)
+        stellt sicher, dass die Projektion bei nicht-quadratischen Modellen
+        korrekt bleibt. roi_offset_y korrigiert Y-Koordinaten nach ROI-Crop
+        (0 bei Bottom-Crop; > 0 bei zukünftigen Top-Crop-Varianten).
         """
         detections     = []
         conf_threshold = get_runtime("conf_thresh")
@@ -618,14 +597,14 @@ class SpeedSignDetector:
                 )
                 if score < conf_threshold:
                     continue
-                # Fix 4: self.model_w/h statt INPUT_SIZE
+                # Normierte Koordinaten → Modell-Pixel → Kamera-Pixel
                 x1_l = x1_n * self.model_w;  y1_l = y1_n * self.model_h
                 x2_l = x2_n * self.model_w;  y2_l = y2_n * self.model_h
                 rx1 = int(max(0, min((x1_l - pad_x) / scale, orig_w)))
                 ry1 = int(max(0, min((y1_l - pad_y) / scale, orig_h)))
                 rx2 = int(max(0, min((x2_l - pad_x) / scale, orig_w)))
                 ry2 = int(max(0, min((y2_l - pad_y) / scale, orig_h)))
-                # Fix 6: Y-Koordinaten um ROI-Versatz korrigieren
+                # Y-Korrektur nach ROI-Crop (No-Op bei Bottom-Crop mit offset=0)
                 ry1 += roi_offset_y
                 ry2 += roi_offset_y
                 if rx2 <= rx1 or ry2 <= ry1:
@@ -660,7 +639,6 @@ class TemporalDebouncer:
         self.buffer        = deque(maxlen=buffer_size)
 
     def update(self, class_id: Optional[int]) -> Optional[int]:
-        # Fix 9: Counter kommt aus Modulebene -- kein lokaler Import mehr.
         self.buffer.append(class_id)
         counts = Counter(v for v in self.buffer if v is not None)
         if not counts:
@@ -1064,7 +1042,6 @@ class MJPEGHandler(http.server.BaseHTTPRequestHandler):
                 set_runtime("show_ai_eye", v)
                 msg += f" ai_eye={v}"
             if "roi" in params:
-                # Fix 6: ROI-Crop zur Laufzeit schaltbar
                 v = params["roi"][0] == "1"
                 set_runtime("roi_crop", v)
                 msg += f" roi_crop={v}"
@@ -1089,7 +1066,6 @@ class MJPEGHandler(http.server.BaseHTTPRequestHandler):
                              "multipart/x-mixed-replace; boundary=frame")
             self.end_headers()
             try:
-                # Fix 11: threading.Event statt bool-Flag
                 while _stream_event.is_set():
                     with _frame_lock:
                         jpeg = _current_jpeg
@@ -1184,8 +1160,8 @@ class CameraStream:
 
     Thread-Sicherheit: Lock + np.copy() verhindern Race Conditions.
 
-    Fix 5: stop() wartet mit join(timeout) auf Thread-Ende.
-           Verhindert Race Conditions beim Kamera-Neustart.
+    stop() wartet mit join(timeout) auf das Thread-Ende und verhindert
+    damit Race Conditions beim Kamera-Neustart.
     """
 
     def __init__(self, cam: Picamera2) -> None:
@@ -1202,7 +1178,7 @@ class CameraStream:
             time.sleep(0.01)
 
     def stop(self) -> None:
-        """Fix 5: Aktives Warten auf Thread-Ende (join) statt nur Flag setzen."""
+        """Setzt das Stop-Flag und wartet via join() auf das Thread-Ende."""
         self._active = False
         self._thread.join(timeout=2.0)
 
@@ -1349,13 +1325,13 @@ def draw_speed_display(frame_bgr: np.ndarray, state: SpeedStateMachine,
 
 def _build_camera_controls(frame_us: int) -> dict:
     """
-    Erzeugt das Controls-Dictionary fuer Picamera2-Konfiguration.
+    Erzeugt das Controls-Dictionary für die Picamera2-Konfiguration.
 
-    Fix 2: AeEnable=True aktiviert Auto-Exposure-Control (AEC) des imx708.
-           ExposureTime=MAX_EXPOSURE_US (4 ms) dient als obere Grenze --
-           bei Vollautomatik wuerde 8 ms bei Autobahnfahrt zu Motion-Blur
-           auf reflektierenden Schildflaechendetails fuehren.
-           AnalogueGain bleibt als Safety-Cap bei 8.0.
+    AeEnable=True aktiviert den Auto-Exposure-Controller (AEC) des IMX708.
+    ExposureTime=MAX_EXPOSURE_US (4 ms) dient als obere Grenze — längere
+    Belichtungszeiten erzeugen bei Autobahnfahrt Motion-Blur auf
+    reflektierenden Schildflächen. AnalogueGain=8.0 ist ein Safety-Cap
+    gegen übermäßiges Rauschen bei schlechtem Licht.
     """
     return {
         "AeEnable":            True,
@@ -1393,7 +1369,6 @@ def main() -> None:
     # --- Initialisierung (Fortschritts-Feedback einzeilig) ---
     print("Starte Speed Sign Detector ...")
 
-    # Fix 1: Encode-Worker-Thread starten (still)
     threading.Thread(target=_encode_worker, daemon=True,
                      name="EncodeWorker").start()
     start_stream_server()
@@ -1473,10 +1448,7 @@ def main() -> None:
                 set_runtime("cpu_temp", get_cpu_temp())
                 last_temp_t = t0
 
-            # -----------------------------------------------------------
-            # Fix 7: Runtime-Werte einmal pro Loop-Durchlauf cachen.
-            # Spart 6-8 Lock-Acquisitions pro Frame.
-            # -----------------------------------------------------------
+            # Runtime-Werte einmal pro Loop-Durchlauf cachen (spart Lock-Acquisitions).
             infer_every = get_runtime("infer_every")
             deb_count   = get_runtime("debounce")
             roi_active  = get_runtime("roi_crop")
@@ -1485,7 +1457,7 @@ def main() -> None:
             if get_runtime("_mode_change"):
                 set_runtime("_mode_change", False)
                 new_mode = get_runtime("camera_mode")
-                cam_stream.stop()                          # Fix 5: join() intern
+                cam_stream.stop()                          # join() intern
                 cam_w, cam_h, fps = restart_camera(cam, new_mode)
                 last_detections   = []
                 last_primary      = None
@@ -1499,10 +1471,9 @@ def main() -> None:
             # Frame holen (nicht-blockierend)
             frame_bgr = cam_stream.read()
 
-            # -----------------------------------------------------------
-            # Fix 8: Thread-Tod erkennen und automatisch neu starten.
-            # Vorher: lautloser Ausfall + endloser busy-wait auf None.
-            # -----------------------------------------------------------
+            # Thread-Tod erkennen und automatisch neu starten.
+            # Ohne diese Prüfung würde ein stiller Thread-Absturz zu einem
+            # endlosen busy-wait auf None führen.
             if frame_bgr is None:
                 if not cam_stream._thread.is_alive():
                     _print_line("[WARN] CameraStream-Thread tot -- starte neu ...")
@@ -1524,18 +1495,15 @@ def main() -> None:
                 # cam_stream.read() liefert bereits np.copy() -- Referenz reicht.
                 last_inf_frame = frame_bgr
 
-                # Fix 6: ROI-Crop-Flag aus gecachtem Laufzeit-Wert
                 img_rgb, scale, pad_x, pad_y, roi_offset_y = detector.preprocess(
                     last_inf_frame, cam_w, cam_h, apply_roi_crop=roi_active)
                 last_img_rgb      = img_rgb
                 last_roi_offset_y = roi_offset_y
                 result            = detector.run(img_rgb)
 
-                # Fix 4 + Fix 6: model_w/h + roi_offset_y im Postprocessing
                 last_detections = detector.postprocess(
                     result, cam_w, cam_h, scale, pad_x, pad_y, roi_offset_y)
 
-                # Fix 3: Neue Score-Funktion mit cam_w/cam_h
                 last_primary      = select_primary_detection(
                     last_detections, cam_w, cam_h)
                 cid               = last_primary["class_id"] if last_primary else None
@@ -1562,7 +1530,7 @@ def main() -> None:
             draw_detections(enc_frame, last_detections, last_primary)
             draw_speed_display(enc_frame, state, debounce_progress, deb_count)
 
-            # Fix 1: Frame asynchron in Encode-Queue einreihen.
+            # Frame asynchron in Encode-Queue einreihen (non-blocking).
             if ffmpeg_pipe:
                 if not ffmpeg_pipe.write(enc_frame):
                     _print_line("[WARN] FFmpeg-Pipe unterbrochen -> MJPEG")
@@ -1597,8 +1565,7 @@ def main() -> None:
         # Statuszeile abschliessen (Leerzeichen-Padding loescht letzte Zeile)
         print(f"\r{'':<{_STATUS_LINE_LEN}}", flush=True)
         print("[System] Beende ...")
-        # Fix 11: Event statt bool-Flag signalisieren
-        _stream_event.clear()
+        _stream_event.clear()    # Shutdown signalisieren
         try:
             cam_stream.stop()
         except Exception:

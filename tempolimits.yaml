@@ -1,24 +1,24 @@
-# ===============================================================
-# Anleitung: YOLO Konfigurations-Datei (tempolimits.yaml)
-# ===============================================================
+# ==============================================================================
+# tempolimits.yaml  —  Zentrale Datensatz-Konfiguration
+# ==============================================================================
 #
-# Wozu ist diese Datei da?
-# Das ist die "Landkarte" für das Training. Sie sagt YOLO,
-# wo es die Bilder findet und was die Klassen (Schilder) bedeuten.
+# Definiert Datenpfade und Klassennamen für alle Skripte im Projekt.
+# Wird von train_yolo.py, generate_universal_calib.py und split_dataset.py
+# als einzige Wahrheitsquelle für Klassendefinitionen genutzt.
 #
-# ===============================================================
+# ==============================================================================
 
-# Pfad zum Dataset – relativ zur Position dieser YAML-Datei
+# Basis-Pfad des Datensatzes — relativ zur Position dieser Datei
 path: datasets/sorted_dataset
 
-# Diese Pfade sind relativ zum 'path' oben
+# Unterordner relativ zu 'path'
 train: images/train
-val: images/val
-#test: images/test
+val:   images/val
+# test: images/test   # Test-Split derzeit nicht aktiv
 
-# Klassennamen
+# Klassennamen (Klassen-ID → Bezeichnung)
 names:
-  # --- Klassische Tempolimits (Rund, Rot) ---
+  # Klassische Tempolimits (rundes rotes Schild, direkte Zuordnung)
   0: Tempolimit_20
   1: Tempolimit_30
   2: Tempolimit_40
@@ -26,25 +26,22 @@ names:
   4: Tempolimit_60
   5: Tempolimit_70
   6: Tempolimit_80
-  7: Tempolimit_90   # Nicht vorhanden, aber für die Zukunft reserviert
+  7: Tempolimit_90    # Reserviert — im GTSDB-Datensatz nicht enthalten
   8: Tempolimit_100
-  9: Tempolimit_110  # Nicht vorhanden, aber für die Zukunft reserviert
+  9: Tempolimit_110   # Reserviert — im GTSDB-Datensatz nicht enthalten
   10: Tempolimit_120
-  11: Tempolimit_130 # Nicht vorhanden, aber für die Zukunft reserviert
+  11: Tempolimit_130  # Reserviert — im GTSDB-Datensatz nicht enthalten
 
-  # --- Implizite Tempolimits ---
-  12: Spielstrasse          # Bedeutet: Schritttempo
-  13: Ende_Spielstrasse     # Bedeutet: Wieder 30 oder 50
-  14: Ortsschild            # Bedeutet: 50 km/h (!)
-  15: Ende_Ortsschild       # Bedeutet: 100 km/h (!)
-  
-  # --- Aufhebungen ---
-  16: Aufhebeschild         # Weiß mit Strichen, leer
-  17: Aufhebeschild_Zahl    # Graue Zahl durchgestrichen (egal Welche)
-  
-  # --- Autobahn Kontext ---
-  18: Autobahn 
-  19: Ende_Autobahn
+  # Kontextschilder mit festem Folgegrenzwert (Auflösung in der State Machine)
+  12: Spielstrasse          # → 7 km/h  (Schrittgeschwindigkeit, blauer Ring)
+  13: Ende_Spielstrasse     # → 50 km/h
+  14: Ortsschild            # → 50 km/h
+  15: Ende_Ortsschild       # → 100 km/h
 
- 
- 
+  # Aufhebungen (kontextabhängige Auflösung: innerorts 30 km/h, außerorts 100 km/h)
+  16: Aufhebeschild         # Weiß mit Diagonalstreifen, ohne Zahl
+  17: Aufhebeschild_Zahl    # Weiß mit durchgestrichener Zahl
+
+  # Autobahn-Kontext
+  18: Autobahn              # → 130 km/h (blauer Ring)
+  19: Ende_Autobahn         # → 100 km/h

@@ -195,10 +195,12 @@ Die Offline-Augmentierung simuliert gezielt die Bedingungen bei Autobahnfahrt:
 
 | Effekt | Parameter | Zweck |
 |---|---|---|
-| Motion Blur | Kernel (13–21), 60% Wahrscheinlichkeit | 130 km/h Fahrtgeschwindigkeit |
-| Affine Shear | Y: ±4°, X: ±3°, Rot: ±4°, 60% | Rolling-Shutter-Verzerrung der IMX708 |
-| Sensor Noise | Varianz 40–150, 60% | High-ISO / Nacht / Regen |
-| Helligkeit/Kontrast | 50% | Tunnel, Gegenlicht |
+| Motion Blur | Kernel (13–21), 60 % | 130 km/h Fahrtgeschwindigkeit |
+| Affine Shear | Y: ±4°, X: ±3°, Rot: ±4°, 60 % | Rolling-Shutter-Verzerrung (IMX708) |
+| Gauß-Rauschen | std_range (0.025–0.048), 60 % | High-ISO-Rauschen (≈ ISO 1600–6400) |
+| Farb-Jitter | Hue ±5°, Sat/Val ±20, 60 % | Lichtverhältnisse, Tageszeit |
+| Graustufen | 8 % | IMX708 bei sehr schlechtem Licht |
+| Helligkeit/Kontrast | 50 % | Tunnel, Gegenlicht |
 
 YOLO-Online-Augmentierungen, die bei Schildern schaden würden, sind deaktiviert: `fliplr=0` (Zahlen werden gespiegelt), `mosaic=0`, `mixup=0`.
 
@@ -361,11 +363,13 @@ Picamera2 liefert trotz `BGR888`-Konfiguration intern RGB-Daten. `CameraStream` 
 
 Vollständige Installation via `setup_venv.bat`. Kernpakete:
 
+> **Albumentations 2.0:** Das Projekt verwendet Albumentations ≥ 2.0.8. Gegenüber 1.4.x wurden drei breaking changes behoben: `GaussNoise(var_limit)` → `std_range`, `ISONoise` (entfernt) → `HueSaturationValue`, `PadIfNeeded(value)` → `fill`.
+
 | Paket | Version | Zweck |
 |---|---|---|
 | torch | 2.5.1+cu121 | Training (CUDA 12.1) |
 | ultralytics | 8.3.x | YOLOv8 / YOLO11 |
-| albumentations | 1.4.18 | Offline-Augmentierung |
+| albumentations | >=2.0.8 | Offline-Augmentierung |
 | onnx | 1.20.0 | Export + Validierung |
 | onnxruntime-gpu | 1.20.1 | ONNX-Inferenz (optional) |
 | opencv-python | 4.10.0.84 | Bildverarbeitung |

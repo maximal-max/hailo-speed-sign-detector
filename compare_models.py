@@ -1,14 +1,18 @@
 """
-================================================================
-YOLO Advanced Model Comparator - Alle Trainings automatisch finden und vergleichen
-================================================================
-Features:
-1. Findet ALLE Trainings (egal ob runs/detect oder runs/hailo_train).
-2. Liest 'args.yaml', um Modell-Typ (n/s/m/l/x) und Aufloesung zu finden.
-3. Unterstuetzt YOLOv8, YOLO11 und neuere Generationen.
-4. Ranking basierend auf mAP50-95.
-5. Zeigt mAP@50 und mAP@50-95 an.
+==============================================================================
+compare_models.py  —  YOLO Trainings-Vergleich
+==============================================================================
 
+Durchsucht runs/ rekursiv nach results.csv und erstellt ein nach mAP50-95
+absteigend sortiertes Ranking aller abgeschlossenen Trainingsläufe.
+
+VERWENDUNG:
+  python compare_models.py
+
+VORAUSSETZUNGEN:
+  Mindestens ein abgeschlossener Trainingslauf unter runs/ mit results.csv.
+
+==============================================================================
 """
 
 import re
@@ -16,14 +20,20 @@ import pandas as pd
 import yaml
 from pathlib import Path
 
-# Suchpfad (Root fuer alle Trainings)
+
+# ==============================================================================
+# KONFIGURATION
+# ==============================================================================
+
+# Wurzelpfad aller Trainingsläufe
 BASE_DIR = Path("runs")
 
+# ==============================================================================
+# ANALYSE
+# ==============================================================================
+
 def get_model_info(run_folder):
-    """
-    Versucht, Metadaten aus args.yaml zu extrahieren.
-    Gibt ein Dictionary mit 'variant' (n/s/m) und 'imgsz' zurueck.
-    """
+    """Liest Modell-Variante und Eingangsauflösung aus args.yaml."""
     info = {
         "variant": "?",
         "imgsz": "?"
@@ -57,7 +67,7 @@ def get_model_info(run_folder):
     return info
 
 def analyze_run(csv_path):
-    """Liest die results.csv und findet die beste Epoche (basierend auf mAP50-95)."""
+    """Liest results.csv und gibt die Metriken der besten Epoche (mAP50-95) zurück."""
     try:
         df = pd.read_csv(csv_path)
         df.columns = df.columns.str.strip()
@@ -99,6 +109,10 @@ def analyze_run(csv_path):
         "Path":     str(run_folder)
     }
 
+# ==============================================================================
+# AUSGABE
+# ==============================================================================
+
 def scan_and_rank():
     if not BASE_DIR.exists():
         print(f"Ordner '{BASE_DIR}' nicht gefunden.")
@@ -122,7 +136,7 @@ def scan_and_rank():
 
     ranked = sorted(all_models, key=lambda x: x['mAP50-95'], reverse=True)
 
-    # --- Spaltenbreiten dynamisch berechnen ---
+    # Spaltenbreiten dynamisch an längste Einträge anpassen
     w_rank    = max(len("RANK"),  len(str(len(ranked))))
     w_name    = max(len("NAME"),  max(len(m['Name'])        for m in ranked))
     w_variant = max(len("MODEL"), max(len(m['Variant'])     for m in ranked))

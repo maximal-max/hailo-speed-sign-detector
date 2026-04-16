@@ -1,17 +1,21 @@
 """
-================================================================
-PC_application.py  –  Speed Sign Detector  |  HUD Edition v3
-================================================================
-Visuelles Design: Automotive HUD / Dark Cockpit
+==============================================================================
+PC_application.py  —  Speed Sign Detector  |  Automotive HUD
+==============================================================================
 
-v3 Performance-Optimierungen:
-  - Inference-Thread:  YOLO läuft asynchron, Display nie blockiert
-  - Queue(maxsize=1):  immer der aktuellste Frame, keine Staus
-  - Fast-mss:          frombuffer + BGR-Slice statt cvtColor
-  - Merged UI:         ein Fenster (Camera | Dashboard), 1× imshow
-  - Half-Precision:    FP16 wenn CUDA verfügbar
-  - Tastaturkürzel: q/ESC=Ende  r=Reset  s=Screenshot  c=Centered
-================================================================
+Windows-Testanwendung für das trainierte YOLO-Modell.
+Quellen: Webcam (OpenCV) oder Bildschirmaufnahme (mss).
+
+Architektur:
+  - Inference-Thread:   YOLO läuft asynchron; Display-Loop wird nie blockiert.
+  - Queue(maxsize=1):   Immer der aktuellste Frame; veraltete Frames werden
+                        verworfen wenn der Inference-Thread noch rechnet.
+  - Merged Window:      Kamerabild und Dashboard in einem einzigen cv2.imshow().
+  - IMG_SIZE auto:      Wird beim Start aus den Modell-Metadaten gelesen.
+
+Tastaturkürzel:  q / ESC = Beenden   r = Reset   s = Screenshot
+
+==============================================================================
 """
 
 import cv2

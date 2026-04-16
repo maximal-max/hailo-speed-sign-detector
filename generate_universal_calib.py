@@ -133,7 +133,7 @@ def build_letterbox_pipeline(img_size: int) -> A.Compose:
             min_height=img_size,
             min_width=img_size,
             border_mode=cv2.BORDER_CONSTANT,
-            value=114,   # Grauer Rand, identisch zu YOLO-Standard und Pi-Inferenz
+            fill=114,    # Letterbox-Grau; identisch zu YOLOv11-Standard und Pi-Inferenz
         ),
     ])
 
