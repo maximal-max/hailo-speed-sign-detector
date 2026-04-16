@@ -86,7 +86,7 @@ echo.
 echo ================================
 echo 5) Hailo Export / ONNX Stack
 echo ================================
-pip install onnx==1.20.0 onnxruntime-gpu==1.20.1 onnxsim==0.4.36
+pip install onnx==1.20.0 onnxruntime-gpu==1.20.1 onnxslim==0.1.91
 if errorlevel 1 ( echo FEHLER bei ONNX Stack & exit /b 1 )
 
 pip install onnx-graphsurgeon --index-url https://pypi.ngc.nvidia.com

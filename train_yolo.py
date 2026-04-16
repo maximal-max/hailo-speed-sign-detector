@@ -69,7 +69,7 @@ DRY_RUN = True
 SEED = 42
 
 # --- Modell & Training ---
-NAME       = "dry_640px_YOLOv11m"   # Unterordner-Name in RUNS_DIR
+NAME       = "640px_YOLO11m"   # Unterordner-Name in RUNS_DIR
 MODEL_BASE = "yolo11m.pt"      # Basis-Gewichte (werden automatisch heruntergeladen)
 IMG_SIZE   = 640                # Eingabegröße in Pixel (quadratisch); muss mit HEF übereinstimmen
 EPOCHS     = 1   if DRY_RUN else 200
