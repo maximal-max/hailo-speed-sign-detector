@@ -1,6 +1,6 @@
 """
 ==============================================================================
-YOLOv8s Training & Export (Hailo-8 Optimiert / High-Speed)
+YOLO Training & Export (Hailo-8 Optimiert / High-Speed)
 ==============================================================================
 
 HARDWARE:
@@ -15,7 +15,7 @@ SZENARIO:
 PIPELINE-ÜBERBLICK:
   1. Augmentiertes Dataset bauen  →  build_augmented_dataset()
   2. Training YAML erzeugen       →  create_training_yaml()
-  3. YOLOv8s Training             →  model.train()
+  3. YOLO    Training             →  model.train()
   4. ONNX-Export + Validierung    →  export_model.export() + onnx.checker
 
   Kalibrierungsset für den Hailo DFC → separates Skript: generate_universal_calib.py
@@ -63,7 +63,7 @@ USER_YAML_FILE = "tempolimits.yaml"
 # DRY-RUN-MODUS
 # True  → Schneller Funktionstest: 64 Bilder, 1 Epoche, keine Augmentierungs-Vervielfachung.
 # False → Echtes Training mit allen Bildern und vollen Epochen.
-DRY_RUN = True
+DRY_RUN = False
 
 # Seed für vollständige Reproduzierbarkeit (Training, Augmentierung, Shuffle)
 SEED = 42
