@@ -1,6 +1,6 @@
 # Echtzeit-Verkehrsschilderkennung — Raspberry Pi 5 + Hailo-8
 
-Echtzeit-Erkennung von Tempolimits und Verkehrsschildern mit YOLOv8s, optimiert für den Hailo-8 KI-Beschleuniger. Das System erkennt 20 Schildklassen — von Tempolimits über Ortsschilder bis hin zu Autobahnschildern — bei Geschwindigkeiten bis 130 km/h.
+Echtzeit-Erkennung von Tempolimits und Verkehrsschildern mit YOLO (v8 / v11), optimiert für den Hailo-8 KI-Beschleuniger. Das System erkennt 20 Schildklassen — von Tempolimits über Ortsschilder bis hin zu Autobahnschildern — bei Geschwindigkeiten bis 130 km/h.
 
 ---
 
@@ -326,17 +326,18 @@ python compare_models.py
 Durchsucht `runs/` rekursiv nach allen `results.csv`-Dateien und erstellt ein Ranking nach mAP50-95:
 
 ```
-RANK  NAME              MODEL       RES   EPOCH  mAP50   mAP50-95   BEWERTUNG
-1     prod_s_640px      Small (s)   640   187    0.8821  0.7634     ⭐ Exzellent
-2     dry_s_640px       Small (s)   640   1      0.1203  0.0891     ❌ Schwach
+RANK  NAME              MODEL        RES   EPOCH  mAP50     mAP50-95   BEWERTUNG
+1     prod_s_640px      v8-Small     640   187    0.8821    0.7634     Exzellent
+2     prod_11s_640px    v11-Small    640   210    0.8654    0.7401     Exzellent
+3     dry_s_640px       v8-Small     640   1      0.1203    0.0891     Schwach
 ```
 
 | mAP50-95 | Bewertung |
 |---|---|
-| ≥ 0.75 | ⭐ Exzellent — Produktionsreif |
-| ≥ 0.65 | ✅ Gut — Solide für den Einsatz |
-| ≥ 0.50 | ⚠ Mittelmäßig — Unsicher bei 130 km/h |
-| < 0.50 | ❌ Schwach — Mehr Daten oder weniger Augmentierung |
+| > 0.75 | Exzellent — Produktionsreif |
+| > 0.60 | Gut — Solide für den Einsatz |
+| > 0.40 | Mittel — Unsicher bei 130 km/h |
+| ≤ 0.40 | Schwach — Mehr Daten oder weniger Augmentierung |
 
 ---
 
@@ -363,7 +364,7 @@ Vollständige Installation via `setup_venv.bat`. Kernpakete:
 | Paket | Version | Zweck |
 |---|---|---|
 | torch | 2.5.1+cu121 | Training (CUDA 12.1) |
-| ultralytics | 8.3.x | YOLOv8 |
+| ultralytics | 8.3.x | YOLOv8 / YOLO11 |
 | albumentations | 1.4.18 | Offline-Augmentierung |
 | onnx | 1.20.0 | Export + Validierung |
 | onnxruntime-gpu | 1.20.1 | ONNX-Inferenz (optional) |

@@ -63,18 +63,18 @@ USER_YAML_FILE = "tempolimits.yaml"
 # DRY-RUN-MODUS
 # True  → Schneller Funktionstest: 64 Bilder, 1 Epoche, keine Augmentierungs-Vervielfachung.
 # False → Echtes Training mit allen Bildern und vollen Epochen.
-DRY_RUN = True
+DRY_RUN = False
 
 # Seed für vollständige Reproduzierbarkeit (Training, Augmentierung, Shuffle)
 SEED = 42
 
 # --- Modell & Training ---
-NAME       = "dry_s_640px"   # Unterordner-Name in RUNS_DIR
-MODEL_BASE = "yolov8s.pt"    # Basis-Gewichte (werden automatisch heruntergeladen)
-IMG_SIZE   = 640             # Eingabegröße in Pixel (quadratisch); muss mit HEF übereinstimmen
+NAME       = "640px_YOLOv11m"   # Unterordner-Name in RUNS_DIR
+MODEL_BASE = "yolo11m.pt"      # Basis-Gewichte (werden automatisch heruntergeladen)
+IMG_SIZE   = 640                # Eingabegröße in Pixel (quadratisch); muss mit HEF übereinstimmen
 EPOCHS     = 1   if DRY_RUN else 200
-PATIENCE   = 50              # Early-Stopping: Abbruch nach N Epochen ohne Verbesserung
-BATCH_SIZE = -1              # -1 = Ultralytics wählt automatisch anhand des VRAM
+PATIENCE   = 50                 # Early-Stopping: Abbruch nach N Epochen ohne Verbesserung
+BATCH_SIZE = -1                 # -1 = Ultralytics wählt automatisch anhand des VRAM
 WORKERS    = min(os.cpu_count() or 4, 8)  # DataLoader-Threads (max. 8)
 
 # --- Augmentierung ---

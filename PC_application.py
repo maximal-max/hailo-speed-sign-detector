@@ -40,7 +40,7 @@ if sys.platform == "win32":
 SOURCE       = "screen"     # "webcam" oder "screen"
 WEBCAM_INDEX = 0
 
-MODEL_PATH        = 'runs/s_800px_ohne_130/weights/best.pt'
+MODEL_PATH        = 'runs/800px_YOLOv11s/weights/best.pt'
 SPEED_SIGN_FOLDER = 'datasets/application_images_dataset'
 
 YOUTUBE      = {"top": 185, "left": 110, "width": 1280, "height": 720}
