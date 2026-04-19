@@ -10,6 +10,7 @@ datasets/*
 !datasets/application_images_dataset/
 
 hailo_calibration/
+model_reports/
 
 # Große Model-Dateien (auch in Unterordnern)
 *.pt

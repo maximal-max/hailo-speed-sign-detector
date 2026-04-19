@@ -43,7 +43,8 @@ Das Projekt ist bewusst auf zwei Plattformen aufgeteilt. **Nur zwei Dateien lauf
 | Kalibrierungsset erstellen | `generate_universal_calib.py` | Windows |
 | Modell kompilieren (`.hef`) | Hailo Cloud Compiler | Web / Windows |
 | Modell auf dem PC testen | `PC_application.py` | Windows |
-| Trainingsläufe vergleichen | `compare_models.py` | Windows |
+| Trainingsläufe vergleichen (Terminal) | `compare_models_advanced.py` | Windows |
+| Trainingsläufe vergleichen (Grafik) | `compare_models_visual.py` | Windows |
 | **Inferenz (Entwicklung)** | **`RPI_debug.py`** | **Raspberry Pi** |
 | **Inferenz (Produktion)** | **`RPI_deploy.py`** | **Raspberry Pi** |
 
@@ -74,7 +75,8 @@ hailo-speed-sign-detector/
 ├── generate_universal_calib.py     ← Schritt 3: Kalibrierungsset für Hailo DFC
 │
 ├── PC_application.py               ← Modell auf dem PC testen (Webcam / Screen)
-├── compare_models.py               ← Trainingsläufe vergleichen
+├── compare_models_advanced.py      ← Trainingsläufe vergleichen (Terminal)
+├── compare_models_visual.py        ← Trainingsläufe vergleichen (PNG/JPG-Export)
 │
 │  ── Raspberry Pi (Inferenz) ────────────────────────────────
 ├── RPI_debug.py                    ← Echtzeit-Inferenz + Web-UI (Entwicklung)
@@ -319,27 +321,55 @@ Beim Start erscheint für 10 Sekunden ein Hinweistext mit Countdown-Balken. Erst
 
 ---
 
-## Trainings-Ergebnisse bewerten (`compare_models.py`)
+## Trainings-Ergebnisse bewerten
+
+### Terminal-Vergleich (`compare_models_advanced.py`)
 
 ```bash
-python compare_models.py
+python compare_models_advanced.py              # Standard (Score-Sortierung)
+python compare_models_advanced.py --export     # + CSV-Export aller Metriken
+python compare_models_advanced.py --top 5      # Nur Top-5 anzeigen
+python compare_models_advanced.py --no-cards   # Nur Tabelle, keine Detailkarten
+python compare_models_advanced.py --sort map50 # Sortierung ändern
 ```
 
-Durchsucht `runs/` rekursiv nach allen `results.csv`-Dateien und erstellt ein Ranking nach mAP50-95:
+Durchsucht `runs/` rekursiv und gibt aus:
+- **Ranking-Tabelle** mit mAP50-95, mAP50, Precision, Recall, F1, gewichtetem Score und Effizienz
+- **Detailkarten** je Lauf (Verluste, ASCII-Balken, Delta zu Platz 1)
+- **Sub-Rankings** pro Einzel-Metrik (Top 5)
+
+Der gewichtete **Gesamt-Score** kombiniert alle Metriken:
 
 ```
-RANK  NAME              MODEL        RES   EPOCH  mAP50     mAP50-95   BEWERTUNG
-1     prod_s_640px      v8-Small     640   187    0.8821    0.7634     Exzellent
-2     prod_11s_640px    v11-Small    640   210    0.8654    0.7401     Exzellent
-3     dry_s_640px       v8-Small     640   1      0.1203    0.0891     Schwach
+Score = 35% × mAP50-95  +  25% × mAP50  +  15% × Precision  +  15% × Recall  +  10% × F1
 ```
 
 | mAP50-95 | Bewertung |
 |---|---|
-| > 0.75 | Exzellent — Produktionsreif |
-| > 0.60 | Gut — Solide für den Einsatz |
-| > 0.40 | Mittel — Unsicher bei 130 km/h |
-| ≤ 0.40 | Schwach — Mehr Daten oder weniger Augmentierung |
+| ≥ 0.85 | ★★★ Exzellent — Produktionsreif |
+| ≥ 0.70 | ★★☆ Sehr gut |
+| ≥ 0.55 | ★★☆ Gut |
+| ≥ 0.40 | ★☆☆ Mittel — Unsicher bei 130 km/h |
+| < 0.40 | ☆☆☆ Schwach — Mehr Daten oder weniger Augmentierung |
+
+### Grafischer Vergleich (`compare_models_visual.py`)
+
+```bash
+python compare_models_visual.py                  # Gesamt + Einzelbilder (Standard)
+python compare_models_visual.py --no-split       # Nur Gesamt-Bild
+python compare_models_visual.py --top 8          # Nur Top-N Modelle
+python compare_models_visual.py --dpi 180        # Höhere Auflösung
+python compare_models_visual.py --fmt jpg        # Format: png (Standard) | jpg
+```
+
+Speichert alle Bilder in einem datierten Unterordner (`model_reports/comparison_YYYY-MM-DD_HH-MM/`):
+
+| Datei | Inhalt |
+|---|---|
+| `overview_*.png` | Gesamt-Ansicht: Tabelle + Radar-Chart + Score-Gauge |
+| `table_*.png` | Ranking-Tabelle als Einzelbild |
+| `radar_*.png` | Radar-Chart (höhere DPI) — alle 5 Metriken im Vergleich |
+| `score_*.png` | Score-Gauge mit Berechnungsformel |
 
 ---
 

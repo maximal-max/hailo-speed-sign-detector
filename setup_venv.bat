@@ -101,6 +101,17 @@ pip install supervision==0.23.0 norfair==2.3.0 mss
 if errorlevel 1 ( echo FEHLER bei Tracking/Inference/Capture & exit /b 1 )
 
 echo.
+echo ================================
+echo 7) OpenCV GUI-Fix
+echo ================================
+REM albumentations (Schritt 3) und supervision (Schritt 6) installieren beide
+REM opencv-python-headless als transitive Abhaengigkeit, die cv2 ueberschreibt.
+REM Deshalb: headless entfernen und opencv-python (mit GUI) als letztes setzen.
+pip uninstall opencv-python-headless -y 2>nul
+pip install opencv-python==4.10.0.84 --force-reinstall
+if errorlevel 1 ( echo FEHLER bei OpenCV GUI-Fix & exit /b 1 )
+
+echo.
 echo =================================================
 echo Teste die Umgebung...
 echo =================================================
@@ -109,7 +120,7 @@ python -c "import ultralytics; print(f'Ultralytics:   {ultralytics.__version__}'
 python -c "import numpy; print(f'Numpy:         {numpy.__version__} (Soll <2.0!)')"
 python -c "import onnx; print(f'ONNX:          {onnx.__version__}')"
 python -c "import onnxruntime; print(f'onnxruntime:   {onnxruntime.__version__}')"
-python -c "import cv2; print(f'OpenCV:        {cv2.__version__} | GUI: {hasattr(cv2, \"namedWindow\")}')"
+python -c "import cv2; w=cv2.__version__; cv2.namedWindow('_t',cv2.WINDOW_NORMAL); cv2.destroyAllWindows(); print(f'OpenCV:        {w} | GUI: OK (namedWindow funktioniert)')"
 python -c "import mss; print(f'mss:           OK')"
 
 echo.
