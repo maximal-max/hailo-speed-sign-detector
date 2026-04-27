@@ -1,18 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-RPI_deploy.py
-=============
-Raspberry Pi 5 + Hailo-8 + Camera Module 3 (imx708) -- HailoRT 4.20.0
-Deploy-Version: Kein Webserver, vollbild GUI-Fenster via OpenCV.
+RPI_deploy.py  —  Speed Sign Detector  |  Produktion
+=====================================================
+Raspberry Pi 5 + Hailo-8 + Camera Module 3 (IMX708)  —  HailoRT 4.20.0
 
-Aufruf:  /usr/bin/python3 RPI_deploy.py
+Ausgabe:   direkt auf HDMI-Display, kein Webserver.
+           Die Bildschirmaufloesung wird automatisch erkannt (fbset / xrandr).
+Umschalten: TAB-Taste oder Klick auf Toggle-Button oben rechts.
 
-Unterschiede zur RPI_application.py:
-  - Kein Flask / HTTP-Webserver / MJPEG-Stream
-  - Kein Kamerabild, keine Bounding-Box-Anzeige
-  - Nur das erkannte Temposchild wird als PNG im Vollbild angezeigt
-  - Start-Disclaimer (10 s) mit Countdown-Balken oben links
+Modi:
+  SIGN  — Vollbild-Schildanzeige (schwarzer Hintergrund, Schild-PNG zentriert)
+  CAM   — Kamerabild mit Bounding Boxes + Einstellungs-Panel (untere 120 px)
+
+Einstellungen (CAM-Modus, Mausklick oder Tastatur):
+  Konfidenz · Infer-N · Debounce · Min. Schildgroesse (px) · ROI-Crop
+  Kameramodus-Wechsel (1280x720@60 <-> 800x600@90)
+
+Tastatur (global):
+  TAB  — Modus wechseln (SIGN <-> CAM)
+  ESC  — Beenden
+
+Tastatur (nur im CAM-Modus):
+  Q / W  — Konfidenz         -/+  (Schritt 0.05)
+  A / S  — Infer-N           -/+  (jeden N-ten Frame inferieren)
+  Y / X  — Debounce          -/+  (Bestaedigungsframes)
+  U / I  — Min. Schildgroesse -/+  (Schritt 5 px)
+  R      — ROI-Crop           umschalten
+  K      — Kameramodus        wechseln (1280x720 <-> 800x600)
 """
 
 import sys
@@ -33,122 +48,175 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 
 # ================================================================
-#  KONFIGURATION  -- hier alle Parameter anpassen
+#  ANZEIGE-KONFIGURATION
 # ================================================================
 
-# Erkennungs-Schwellenwerte
-CONFIDENCE_THRESHOLD = 0.45   # Mindest-Konfidenz einer Detektion  (0.0 – 1.0)
-IOU_THRESHOLD        = 0.45   # Hinweis: wird vom Hailo-Modell intern verwaltet
+DISPLAY_W             = 480
+DISPLAY_H             = 320
+CAM_VIEW_H            = 200    # Kamerabild-Hoehe im CAM-Modus
+FULLSCREEN            = True
+WIN_NAME              = "SpeedDisplay"
+SIGN_DISPLAY_FRACTION = 0.72   # Anteil der Bildschirmhoehe fuer Schild-PNG
+DISCLAIMER_SECONDS    = 10
 
-# Modell-Pfad  (None = automatische Erkennung aus models/active_hef/)
-MODEL_PATH: Optional[str] = None
+# Werden in main() auf die echte Bildschirmaufloesung gesetzt
+_screen_w = DISPLAY_W
+_screen_h = DISPLAY_H
 
-# Kamera
-CAMERA_MODE    = "1280x720@60"   # "1280x720@60" | "1536x864@30" | "800x600@90"
-ROI_CROP       = False           # untere 30% abschneiden (für Fahrzeug-Montage)
-MAX_EXPOSURE_US   = 4000         # Maximale Belichtungszeit in µs
-MAX_ANALOGUE_GAIN = 8.0
+
+# ================================================================
+#  KAMERA
+# ================================================================
+
+CAMERA_MODES = {
+    "1280x720@60": (1280, 720, 60),
+    "800x600@90":  (800,  600, 90),
+}
+DEFAULT_MODE     = "1280x720@60"
+ROI_TOP_FRACTION = 0.70
+
+MAX_EXPOSURE_US      = 4000
+MAX_ANALOGUE_GAIN    = 8.0
 NOISE_REDUCTION_MODE = 1
-SHARPNESS         = 1.5
+SHARPNESS            = 1.5
 
-# Inferenz
-INFER_EVERY_N  = 2   # Jeden N-ten Kamera-Frame durch die NPU schicken
-DEBOUNCE_COUNT = 3   # Anzahl übereinstimmender Treffer bis zur Bestätigung
 
-# Modell-spezifische Overrides (nach erkannter Eingangsbreite)
+# ================================================================
+#  INFERENZ-DEFAULTS
+# ================================================================
+
+CONF_THRESHOLD = 0.50
+INFER_EVERY_N  = 4
+DEBOUNCE_COUNT = 4
+MIN_SIGN_PX    = 20   # Mindestbreite/-hoehe der BBox in Kamera-Pixeln
+
 _MODEL_PARAMS: dict = {
     512: {"conf_thresh": 0.45, "infer_every": 1, "debounce": 3},
     640: {"conf_thresh": 0.45, "infer_every": 2, "debounce": 3},
     800: {"conf_thresh": 0.50, "infer_every": 4, "debounce": 4},
 }
 
-# Anzeige
-FULLSCREEN       = True    # True = Vollbild; False = Fenster (800x480)
-WINDOW_W         = 800     # Fensterbreite  (nur relevant wenn FULLSCREEN=False)
-WINDOW_H         = 480     # Fensterhöhe    (nur relevant wenn FULLSCREEN=False)
-SIGN_DISPLAY_FRACTION = 0.65  # Anteil der Bildschirmhöhe für das Schild-PNG
 
-# Disclaimer
-DISCLAIMER_SECONDS = 10   # Anzeigedauer des Hinweistexts beim Start
+# ================================================================
+#  LAUFZEIT-PARAMETER  (thread-safe)
+# ================================================================
+
+_runtime_lock = threading.Lock()
+_runtime: dict = {
+    "camera_mode":  DEFAULT_MODE,
+    "conf_thresh":  CONF_THRESHOLD,
+    "infer_every":  INFER_EVERY_N,
+    "debounce":     DEBOUNCE_COUNT,
+    "min_sign_px":  MIN_SIGN_PX,
+    "roi_crop":     False,
+    "display_mode": "SIGN",     # "SIGN" | "CAM"
+    "_mode_change": False,
+    "hef_name":     "–",
+    "model_res":    "–x–",
+    "cpu_temp":     0.0,
+    "fps_cam":      0.0,
+    "fps_inf":      0.0,
+    "n_det":        0,
+}
+
+
+def get_runtime(key):
+    with _runtime_lock:
+        return _runtime[key]
+
+
+def set_runtime(key, value):
+    with _runtime_lock:
+        _runtime[key] = value
 
 
 # ================================================================
 #  KONSOLEN-HELPER
 # ================================================================
 
+_STATUS_LINE_LEN = 90
+
+
 def _print_line(msg: str) -> None:
     print(f"\r\033[2K{msg}", flush=True)
 
 
 # ================================================================
-#  BILDSCHIRMAUFLÖSUNG
+#  BILDSCHIRMAUFLOESUNG ERKENNEN
 # ================================================================
 
-def _get_screen_resolution() -> tuple[int, int]:
-    """
-    Ermittelt die native Bildschirmauflösung vor dem Öffnen des OpenCV-Fensters.
-
-    Reihenfolge:
-      1. tkinter  (sauber, keine sichtbaren Fenster)
-      2. xrandr   (Fallback für headless / Wayland ohne tkinter)
-      3. fbset    (Framebuffer-Fallback, z.B. ohne X11)
-      4. Statischer Fallback 1920×1080
-    """
-    # --- tkinter (bevorzugt) ---
+def _detect_screen_size(fallback_w: int, fallback_h: int) -> tuple:
+    """Erkennt die echte Bildschirmaufloesung (fbset oder xrandr)."""
     try:
-        import tkinter as tk
-        root = tk.Tk()
-        root.withdraw()
-        w = root.winfo_screenwidth()
-        h = root.winfo_screenheight()
-        root.destroy()
-        if w > 0 and h > 0:
-            return w, h
-    except Exception:
-        pass
-
-    # --- xrandr ---
-    try:
-        out = subprocess.check_output(["xrandr", "--query"],
-                                      stderr=subprocess.DEVNULL,
-                                      text=True)
-        for line in out.splitlines():
-            if " connected" in line and "x" in line:
-                # Beispiel: "HDMI-1 connected 1920x1080+0+0 ..."
-                for token in line.split():
-                    if "x" in token and "+" in token:
-                        res = token.split("+")[0]
-                        w, h = res.split("x")
-                        return int(w), int(h)
-    except Exception:
-        pass
-
-    # --- fbset (Framebuffer) ---
-    try:
-        out = subprocess.check_output(["fbset", "-s"],
-                                      stderr=subprocess.DEVNULL,
-                                      text=True)
+        out = subprocess.run(
+            ["fbset", "-s"], capture_output=True, text=True, timeout=2
+        ).stdout
         for line in out.splitlines():
             if "geometry" in line:
                 parts = line.split()
-                return int(parts[1]), int(parts[2])
+                if len(parts) >= 3:
+                    return int(parts[1]), int(parts[2])
+    except Exception:
+        pass
+    try:
+        import re
+        out = subprocess.run(
+            ["xrandr"], capture_output=True, text=True, timeout=2
+        ).stdout
+        for line in out.splitlines():
+            m = re.search(r"(\d+)x(\d+).*\*", line)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+    except Exception:
+        pass
+    return fallback_w, fallback_h
+
+
+def _fit_to_screen(frame: np.ndarray) -> np.ndarray:
+    """Skaliert den Content-Frame auf die echte Bildschirmaufloesung."""
+    if _screen_w == DISPLAY_W and _screen_h == DISPLAY_H:
+        return frame
+    return cv2.resize(frame, (_screen_w, _screen_h), interpolation=cv2.INTER_LINEAR)
+
+
+# ================================================================
+#  CURSOR-STEUERUNG
+# ================================================================
+
+def _set_cursor_visible(visible: bool) -> None:
+    """Zeigt oder versteckt den Mauszeiger (Xlib/XFixes, Fallback: xdotool)."""
+    # Methode 1: Xlib XFixes (python3-xlib muss installiert sein)
+    try:
+        from Xlib import display as xdisp
+        from Xlib.ext import xfixes as xf
+        d = xdisp.Display()
+        root = d.screen().root
+        if visible:
+            xf.show_cursor(d, root)
+        else:
+            xf.hide_cursor(d, root)
+        d.sync()
+        d.close()
+        return
+    except Exception:
+        pass
+    # Methode 2: xdotool – Cursor ausserhalb des Bildschirms verschieben
+    try:
+        if visible:
+            pos = [str(_screen_w // 2), str(_screen_h // 2)]
+        else:
+            pos = ["99999", "99999"]
+        subprocess.run(["xdotool", "mousemove"] + pos,
+                       capture_output=True, timeout=1)
     except Exception:
         pass
 
-    _print_line("[WARN] Aufloesung nicht erkannt -- Fallback 1920x1080")
-    return 1920, 1080
-
 
 # ================================================================
-#  MODELL-PFAD  (automatische Erkennung aus ./models/active_hef/)
+#  MODELL-PFAD
 # ================================================================
 
 def _find_hef_path() -> Path:
-    if MODEL_PATH is not None:
-        p = Path(MODEL_PATH)
-        if not p.exists():
-            raise FileNotFoundError(f"Konfigurieter MODEL_PATH nicht gefunden: {p}")
-        return p
     models_dir = Path(__file__).resolve().parent / "models" / "active_hef"
     hef_files  = sorted(models_dir.glob("*.hef"))
     if not hef_files:
@@ -159,9 +227,9 @@ def _find_hef_path() -> Path:
     chosen = hef_files[0]
     if len(hef_files) > 1:
         others = ", ".join(f.name for f in hef_files[1:])
-        _print_line(f"[HEF] Mehrere Modelle gefunden -- nutze '{chosen.name}' "
-                    f"(ignoriert: {others})")
+        _print_line(f"[HEF] Mehrere Modelle -- nutze '{chosen.name}' (ignoriert: {others})")
     return chosen
+
 
 try:
     HEF_PATH = _find_hef_path()
@@ -185,20 +253,7 @@ def get_cpu_temp() -> float:
 
 
 # ================================================================
-#  KAMERA-MODI
-# ================================================================
-
-CAMERA_MODES = {
-    "1280x720@60":  (1280, 720, 60),
-    "1536x864@30":  (1536, 864, 30),
-    "800x600@90":   (800,  600, 90),
-}
-
-ROI_TOP_FRACTION = 0.70   # Anteil des Frames (von oben), der bei ROI-Crop bleibt
-
-
-# ================================================================
-#  KLASSEN-DEFINITIONEN
+#  KLASSEN-DEFINITIONEN & FARBEN
 # ================================================================
 
 SIGN_CLASSES = {
@@ -224,23 +279,34 @@ SIGN_CLASSES = {
     19: {"name": "Ende_Autobahn"},
 }
 
+BBOX_COLORS = {
+    **{i: (0, 200, 0) for i in range(12)},
+    12: (0,  128, 255),
+    13: (0,  220, 255),
+    14: (0,    0, 255),
+    15: (200,  0, 255),
+    16: (255, 220,  0),
+    17: (255, 100,  0),
+    18: (255,  50,  50),
+    19: (128,   0, 128),
+}
+
 
 # ================================================================
 #  SPEED-SIGN PNG-CACHE
 # ================================================================
 
 SPEED_SIGN_FOLDER = Path(__file__).resolve().parent / "datasets" / "application_images_dataset"
-
 _sign_png_cache: dict = {}
 
 
 def _load_sign_png_composited(limit: int, size: int):
-    """Lädt und cached ein Schild-PNG als (afg*a, 1-a)-Tuple für Alpha-Compositing."""
+    """Gibt (afg*a, 1-a)-Tuple fuer Alpha-Compositing-Overlay zurueck."""
     key = (limit, size)
     if key in _sign_png_cache:
         return _sign_png_cache[key]
     path = SPEED_SIGN_FOLDER / f"{limit}.png"
-    raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.exists() else None
+    raw  = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.exists() else None
     if raw is None:
         _sign_png_cache[key] = None
         return None
@@ -256,21 +322,14 @@ def _load_sign_png_composited(limit: int, size: int):
 
 
 def _load_sign_png_bgra(limit: int, size: int) -> Optional[np.ndarray]:
-    """
-    Lädt ein Schild-PNG als BGR-Bild auf transparentem oder weißem Hintergrund
-    zurück (für die eigenständige GUI-Anzeige auf schwarzem Hintergrund).
-    Gibt None zurück, wenn kein PNG gefunden wird.
-    """
+    """Gibt BGRA-Array fuer Vollbild-Schild-Anzeige zurueck."""
     path = SPEED_SIGN_FOLDER / f"{limit}.png"
     if not path.exists():
         return None
     raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if raw is None:
         return None
-    scaled = cv2.resize(raw, (size, size), interpolation=cv2.INTER_AREA)
-    if scaled.ndim == 3 and scaled.shape[2] == 4:
-        return scaled   # BGRA mit Alpha
-    return scaled       # BGR ohne Alpha
+    return cv2.resize(raw, (size, size), interpolation=cv2.INTER_AREA)
 
 
 # ================================================================
@@ -294,25 +353,25 @@ class SpeedStateMachine:
     def update(self, class_id: int) -> None:
         if class_id not in SIGN_CLASSES:
             return
-        direct = {0: 20,  1: 30,  2: 40,  3: 50,  4: 60,  5: 70,
-                  6: 80,  7: 90,  8: 100, 9: 110, 10: 120, 11: 130}
+        direct = {0: 20, 1: 30, 2: 40, 3: 50, 4: 60, 5: 70,
+                  6: 80, 7: 90, 8: 100, 9: 110, 10: 120, 11: 130}
         if class_id in direct:
             self._set(direct[class_id], blue=False)
             return
         if class_id == 12:
-            self._context = "innerorts";  self._set(7, blue=True)
+            self._context = "innerorts";   self._set(7, blue=True)
         elif class_id == 13:
-            self._context = "innerorts";  self._set(50)
+            self._context = "innerorts";   self._set(50)
         elif class_id == 14:
-            self._context = "innerorts";  self._set(50)
+            self._context = "innerorts";   self._set(50)
         elif class_id == 15:
-            self._context = "ausserorts"; self._set(100)
+            self._context = "ausserorts";  self._set(100)
         elif class_id in (16, 17):
             self._set(100 if self._context == "ausserorts" else 30)
         elif class_id == 18:
-            self._context = "ausserorts"; self._set(130, blue=True)
+            self._context = "ausserorts";  self._set(130, blue=True)
         elif class_id == 19:
-            self._context = "ausserorts"; self._set(100)
+            self._context = "ausserorts";  self._set(100)
 
 
 # ================================================================
@@ -320,8 +379,7 @@ class SpeedStateMachine:
 # ================================================================
 
 def select_primary_detection(detections: list,
-                              cam_w: int,
-                              cam_h: int) -> Optional[dict]:
+                              cam_w: int, cam_h: int) -> Optional[dict]:
     if not detections:
         return None
     if len(detections) == 1:
@@ -330,8 +388,7 @@ def select_primary_detection(detections: list,
 
     def score(d):
         x1, y1, x2, y2 = d["bbox"]
-        area_norm = ((x2 - x1) * (y2 - y1)) / frame_area
-        return d["conf"] * area_norm
+        return d["conf"] * ((x2 - x1) * (y2 - y1)) / frame_area
 
     return max(detections, key=score)
 
@@ -349,47 +406,33 @@ class SpeedSignDetector:
         self.input_shape = self.hailo.get_input_shape()
         self.model_h     = self.input_shape[0]
         self.model_w     = self.input_shape[1]
-
-        # Modell-Parameter aus Mapping ableiten
         params = _MODEL_PARAMS.get(self.model_w)
         if params:
-            self.conf_threshold = params["conf_thresh"]
-            self.infer_every_n  = params["infer_every"]
-            self.debounce_count = params["debounce"]
+            with _runtime_lock:
+                _runtime["conf_thresh"] = params["conf_thresh"]
+                _runtime["infer_every"] = params["infer_every"]
+                _runtime["debounce"]    = params["debounce"]
         else:
-            _print_line(f"[WARN] Kein Param-Mapping fuer {self.model_w}px -- "
-                        f"Defaults beibehalten.")
-            self.conf_threshold = CONFIDENCE_THRESHOLD
-            self.infer_every_n  = INFER_EVERY_N
-            self.debounce_count = DEBOUNCE_COUNT
+            _print_line(f"[WARN] Kein Param-Mapping fuer {self.model_w}px -- Defaults.")
+        with _runtime_lock:
+            _runtime["hef_name"]  = hef_path.name
+            _runtime["model_res"] = f"{self.model_w}x{self.model_h}"
 
     def close(self) -> None:
         try:
             time.sleep(0.3)
             self.hailo.close()
-            _print_line("[Hailo] Sauber beendet.")
+            print("[Hailo] Sauber beendet.")
         except Exception as e:
             if "HAILO_STREAM_ABORT" not in str(e) and "system_error" not in str(e):
-                _print_line(f"[Hailo] Beenden: {e}")
+                print(f"[Hailo] Beenden: {e}")
 
     def preprocess(self, frame_bgr: np.ndarray, cam_w: int, cam_h: int,
                    apply_roi_crop: bool = False):
-        """
-        Letterbox-Skalierung auf Modell-Eingabegröße und BGR→RGB-Konvertierung.
-
-        Bei apply_roi_crop=True werden die unteren (1 - ROI_TOP_FRACTION)*100 %
-        abgeschnitten. Da der Crop vom unteren Rand erfolgt, bleibt der Y-Offset
-        für die BBox-Rückprojektion 0.
-
-        Rückgabe: (img_rgb, scale, pad_x, pad_y, roi_offset_y)
-        """
         roi_offset_y = 0
         if apply_roi_crop:
-            h_orig    = frame_bgr.shape[0]
-            roi_h     = int(h_orig * ROI_TOP_FRACTION)
+            roi_h     = int(frame_bgr.shape[0] * ROI_TOP_FRACTION)
             frame_bgr = frame_bgr[:roi_h, :]
-            # Bottom-Crop: Bild beginnt weiterhin bei y=0, kein Y-Versatz nötig.
-            roi_offset_y = 0
         h, w  = frame_bgr.shape[:2]
         scale = min(self.model_w / w, self.model_h / h)
         nw    = int(w * scale)
@@ -401,9 +444,8 @@ class SpeedSignDetector:
             resized,
             pad_y, self.model_h - nh - pad_y,
             pad_x, self.model_w - nw - pad_x,
-            cv2.BORDER_CONSTANT, value=(114, 114, 114)   # Letterbox-Grau (YOLOv11-Standard)
+            cv2.BORDER_CONSTANT, value=(114, 114, 114)
         )
-        # BGR→RGB: Hailo-Modell wurde mit RGB-Daten trainiert.
         img_rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
         return img_rgb, scale, pad_x, pad_y, roi_offset_y
 
@@ -413,15 +455,8 @@ class SpeedSignDetector:
     def postprocess(self, result, orig_w: int, orig_h: int,
                     scale: float, pad_x: int, pad_y: int,
                     roi_offset_y: int = 0) -> list:
-        """
-        Dekodiert Hailo-Output zu einer Liste von Detektionen.
-
-        Koordinaten werden aus dem normierten Modell-Raum zurück in den
-        Kamera-Frame projiziert. self.model_w/h (statt globaler Konstanten)
-        stellt sicher, dass die Projektion bei nicht-quadratischen Modellen
-        korrekt bleibt. roi_offset_y korrigiert Y-Koordinaten nach ROI-Crop.
-        """
-        detections = []
+        detections     = []
+        conf_threshold = get_runtime("conf_thresh")
         if not isinstance(result, list):
             return detections
         for cls_id, dets in enumerate(result):
@@ -436,16 +471,14 @@ class SpeedSignDetector:
                     float(det[0]), float(det[1]),
                     float(det[2]), float(det[3]), float(det[4])
                 )
-                if score < self.conf_threshold:
+                if score < conf_threshold:
                     continue
-                # Normierte Koordinaten → Modell-Pixel → Kamera-Pixel
                 x1_l = x1_n * self.model_w;  y1_l = y1_n * self.model_h
                 x2_l = x2_n * self.model_w;  y2_l = y2_n * self.model_h
                 rx1 = int(max(0, min((x1_l - pad_x) / scale, orig_w)))
                 ry1 = int(max(0, min((y1_l - pad_y) / scale, orig_h)))
                 rx2 = int(max(0, min((x2_l - pad_x) / scale, orig_w)))
                 ry2 = int(max(0, min((y2_l - pad_y) / scale, orig_h)))
-                # Y-Korrektur nach ROI-Crop (0 bei Bottom-Crop, >0 bei Top-Crop)
                 ry1 += roi_offset_y
                 ry2 += roi_offset_y
                 if rx2 <= rx1 or ry2 <= ry1:
@@ -484,25 +517,10 @@ class TemporalDebouncer:
     def reset(self) -> None:
         self.buffer.clear()
 
-    def resize(self, new_buffer_size: int) -> None:
-        self.buffer_size   = new_buffer_size
-        self.required_hits = max(1, int(new_buffer_size * 0.6))
-        self.buffer        = deque(self.buffer, maxlen=new_buffer_size)
-
-
-# ================================================================
-#  KAMERA-HARDWARE-PARAMETER
-# ================================================================
-
-def _build_camera_controls(frame_us: int) -> dict:
-    return {
-        "AeEnable":            True,
-        "FrameDurationLimits": (frame_us, frame_us),
-        "ExposureTime":        MAX_EXPOSURE_US,
-        "AnalogueGain":        MAX_ANALOGUE_GAIN,
-        "NoiseReductionMode":  NOISE_REDUCTION_MODE,
-        "Sharpness":           SHARPNESS,
-    }
+    def resize(self, new_size: int) -> None:
+        self.buffer_size   = new_size
+        self.required_hits = max(1, int(new_size * 0.6))
+        self.buffer        = deque(self.buffer, maxlen=new_size)
 
 
 # ================================================================
@@ -547,7 +565,39 @@ class CameraStream:
 
 
 # ================================================================
-#  GUI: DISCLAIMER-ANZEIGE
+#  KAMERA-HARDWARE
+# ================================================================
+
+def _build_camera_controls(frame_us: int) -> dict:
+    return {
+        "AeEnable":            True,
+        "FrameDurationLimits": (frame_us, frame_us),
+        "ExposureTime":        MAX_EXPOSURE_US,
+        "AnalogueGain":        MAX_ANALOGUE_GAIN,
+        "NoiseReductionMode":  NOISE_REDUCTION_MODE,
+        "Sharpness":           SHARPNESS,
+    }
+
+
+def restart_camera(cam: Picamera2, mode_name: str) -> tuple:
+    cam_w, cam_h, fps = CAMERA_MODES.get(mode_name, CAMERA_MODES[DEFAULT_MODE])
+    frame_us = int(1_000_000 / fps)
+    _print_line(f"[Kamera] Modusaenderung -> {mode_name}")
+    cam.stop()
+    cfg = cam.create_video_configuration(
+        main={"format": "BGR888", "size": (cam_w, cam_h)},
+        controls=_build_camera_controls(frame_us),
+        display=None,
+        encode=None
+    )
+    cam.configure(cfg)
+    cam.start()
+    time.sleep(1.5)
+    return cam_w, cam_h, fps
+
+
+# ================================================================
+#  DISCLAIMER
 # ================================================================
 
 DISCLAIMER_TEXT = (
@@ -556,218 +606,419 @@ DISCLAIMER_TEXT = (
     "aktiv auf die Verkehrsschilder.",
 )
 
-# Farben (BGR)
-_BG_COLOR       = (20,  20,  20)   # Dunkler Hintergrund
-_TEXT_COLOR     = (220, 220, 220)  # Heller Text
-_BAR_BG_COLOR   = (60,  60,  60)  # Ladebalken-Hintergrund
-_BAR_FG_COLOR   = (0,   200, 100) # Ladebalken-Vordergrund
-_ACCENT_COLOR   = (0,   180, 255) # Akzentfarbe (Countdown-Zahl)
+_BG_COLOR     = (20,  20,  20)
+_TEXT_COLOR   = (220, 220, 220)
+_BAR_BG_COLOR = (60,  60,  60)
+_BAR_FG_COLOR = (0,  200, 100)
+_ACCENT_COLOR = (0,  180, 255)
 
 
-def _show_disclaimer(win_name: str, screen_w: int, screen_h: int) -> None:
-    """
-    Zeigt den Disclaimer-Bildschirm für DISCLAIMER_SECONDS Sekunden.
-
-    Layout:
-      - Hintergrund: dunkelgrau
-      - Mitte:       Hinweistext (mehrzeilig)
-      - Oben links:  animierter Ladebalken + Countdown-Zahl
-    """
+def _show_disclaimer(win_name: str) -> None:
     font      = cv2.FONT_HERSHEY_SIMPLEX
     t_start   = time.monotonic()
-
-    # --- Text-Maße einmalig berechnen ---
-    fs_main   = screen_h / 400.0      # Schriftgröße skaliert zur Bildhöhe
-    fs_small  = screen_h / 650.0
-    thickness = max(1, int(screen_h / 250))
+    fs_main   = DISPLAY_H / 480.0
+    fs_small  = DISPLAY_H / 750.0
+    thickness = max(1, int(DISPLAY_H / 350))
 
     line_heights = []
-    line_widths  = []
     for line in DISCLAIMER_TEXT:
-        (tw, th), bl = cv2.getTextSize(line, font, fs_main, thickness)
-        line_heights.append(th + bl + int(screen_h * 0.015))
-        line_widths.append(tw)
+        (_, th), bl = cv2.getTextSize(line, font, fs_main, thickness)
+        line_heights.append(th + bl + int(DISPLAY_H * 0.018))
 
-    total_text_h = sum(line_heights)
-    start_y      = (screen_h - total_text_h) // 2
+    total_h = sum(line_heights)
+    start_y = (DISPLAY_H - total_h) // 2
 
-    # Ladebalken-Geometrie (oben links, Abstand 3% vom Rand)
-    bar_x      = int(screen_w * 0.03)
-    bar_y      = int(screen_h * 0.04)
-    bar_w      = int(screen_w * 0.25)
-    bar_h      = int(screen_h * 0.025)
-    bar_y_txt  = bar_y - int(screen_h * 0.01)   # Label über dem Balken
+    bar_x = int(DISPLAY_W * 0.04)
+    bar_y = int(DISPLAY_H * 0.07)
+    bar_w = int(DISPLAY_W * 0.35)
+    bar_h = int(DISPLAY_H * 0.04)
 
     while True:
-        elapsed  = time.monotonic() - t_start
+        elapsed = time.monotonic() - t_start
         if elapsed >= DISCLAIMER_SECONDS:
             break
         remaining = DISCLAIMER_SECONDS - elapsed
-        progress  = elapsed / DISCLAIMER_SECONDS  # 0.0 → 1.0
+        progress  = elapsed / DISCLAIMER_SECONDS
 
-        frame = np.full((screen_h, screen_w, 3), _BG_COLOR, dtype=np.uint8)
-
-        # --- Ladebalken (oben links) ---
-        fill_w = int(bar_w * progress)
-        cv2.rectangle(frame,
-                      (bar_x, bar_y),
-                      (bar_x + bar_w, bar_y + bar_h),
-                      _BAR_BG_COLOR, -1)
+        frame    = np.full((DISPLAY_H, DISPLAY_W, 3), _BG_COLOR, dtype=np.uint8)
+        fill_w   = int(bar_w * progress)
+        cv2.rectangle(frame, (bar_x, bar_y), (bar_x+bar_w, bar_y+bar_h), _BAR_BG_COLOR, -1)
         if fill_w > 0:
-            cv2.rectangle(frame,
-                          (bar_x, bar_y),
-                          (bar_x + fill_w, bar_y + bar_h),
-                          _BAR_FG_COLOR, -1)
-        # Rahmen um Balken
-        cv2.rectangle(frame,
-                      (bar_x, bar_y),
-                      (bar_x + bar_w, bar_y + bar_h),
-                      _TEXT_COLOR, 1)
+            cv2.rectangle(frame, (bar_x, bar_y), (bar_x+fill_w, bar_y+bar_h), _BAR_FG_COLOR, -1)
+        cv2.rectangle(frame, (bar_x, bar_y), (bar_x+bar_w, bar_y+bar_h), _TEXT_COLOR, 1)
 
-        # Countdown-Zahl rechts neben Balken
-        countdown_txt = f"{int(remaining) + 1}s"
-        (cw, ch), _  = cv2.getTextSize(countdown_txt, font, fs_small, 1)
-        cv2.putText(frame, countdown_txt,
-                    (bar_x + bar_w + int(screen_w * 0.012),
-                     bar_y + bar_h // 2 + ch // 2),
-                    font, fs_small, _ACCENT_COLOR, max(1, thickness - 1),
-                    cv2.LINE_AA)
+        cnt_txt = f"{int(remaining)+1}s"
+        (cw, ch), _ = cv2.getTextSize(cnt_txt, font, fs_small, 1)
+        cv2.putText(frame, cnt_txt,
+                    (bar_x + bar_w + int(DISPLAY_W * 0.015), bar_y + bar_h//2 + ch//2),
+                    font, fs_small, _ACCENT_COLOR, 1, cv2.LINE_AA)
 
-        # --- Hinweistext (mittig) ---
         cur_y = start_y
         for i, line in enumerate(DISCLAIMER_TEXT):
             (tw, _), _ = cv2.getTextSize(line, font, fs_main, thickness)
-            tx = (screen_w - tw) // 2
-            cv2.putText(frame, line, (tx, cur_y + line_heights[i] - int(screen_h * 0.005)),
+            tx = (DISPLAY_W - tw) // 2
+            cv2.putText(frame, line,
+                        (tx, cur_y + line_heights[i] - int(DISPLAY_H * 0.005)),
                         font, fs_main, _TEXT_COLOR, thickness, cv2.LINE_AA)
             cur_y += line_heights[i]
 
-        cv2.imshow(win_name, frame)
-        # ESC bricht den Disclaimer vorzeitig ab
+        cv2.imshow(win_name, _fit_to_screen(frame))
         if cv2.waitKey(33) == 27:
             break
 
 
 # ================================================================
-#  GUI: HAUPT-ANZEIGEFRAME AUFBAUEN
+#  BUTTON-SYSTEM
 # ================================================================
 
-def _draw_no_limit_screen(frame: np.ndarray, screen_w: int, screen_h: int) -> None:
-    """Zeigt einen Platzhalter, wenn noch kein Limit erkannt wurde."""
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    fs   = screen_h / 480.0
-    th   = max(1, int(screen_h / 300))
-    msg  = "Erkennung laeuft ..."
-    (tw, txth), _ = cv2.getTextSize(msg, font, fs, th)
-    cv2.putText(frame, msg,
-                ((screen_w - tw) // 2, (screen_h + txth) // 2),
-                font, fs, (100, 100, 100), th, cv2.LINE_AA)
+# Globale Button-Registry: name -> (x1, y1, x2, y2)
+# Wird jeden Frame neu befuellt; Klicks via Mouse-Callback ausgewertet.
+_buttons: dict = {}
+
+_FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
-def _draw_sign_png(frame: np.ndarray, limit: int,
-                   screen_w: int, screen_h: int,
-                   use_blue_circle: bool = False) -> None:
-    """
-    Zeichnet das Schild-PNG zentriert auf dem (schwarzen) Frame.
-    Nutzt Alpha-Compositing wenn PNG einen Alpha-Kanal hat.
-    Fallback: gezeichneter Kreis mit Zahl.
-    use_blue_circle: True für blaue Schilder (z.B. Autobahn), False für rote Temposchilder.
-    """
-    size  = int(screen_h * SIGN_DISPLAY_FRACTION)
-    size  = size - (size % 2)   # gerade Zahl für sauberes Centering
-    x1    = (screen_w - size) // 2
-    y1    = (screen_h - size) // 2
-    x2    = x1 + size
-    y2    = y1 + size
-
-    png = _load_sign_png_bgra(limit, size)
-
-    if png is not None:
-        if png.ndim == 3 and png.shape[2] == 4:
-            # Alpha-Compositing auf schwarzem Hintergrund
-            a    = png[:, :, 3:4].astype(np.float32) / 255.0
-            fg   = png[:, :, :3].astype(np.float32)
-            bg   = frame[y1:y2, x1:x2].astype(np.float32)
-            frame[y1:y2, x1:x2] = (a * fg + (1.0 - a) * bg).astype(np.uint8)
-        else:
-            frame[y1:y2, x1:x2] = png[:, :, :3]
+def _draw_btn(frame: np.ndarray, name: str, label: str,
+              x1: int, y1: int, x2: int, y2: int,
+              active: Optional[bool] = None,
+              fs: float = 0.35) -> None:
+    """Zeichnet einen Button, registriert seine Klickflaeche."""
+    _buttons[name] = (x1, y1, x2, y2)
+    if active is True:
+        bg, fg, brd = (20, 80, 30), (80, 220, 100), (30, 120, 50)
+    elif active is False:
+        bg, fg, brd = (70, 20, 20), (200, 80,  80), (100, 30, 30)
     else:
-        # Fallback: gezeichneter Kreis
-        cx     = screen_w // 2
-        cy     = screen_h // 2
-        radius = size // 2
-        ring_w = max(4, radius // 7)
-
-        ring_color = (0, 0, 220) if use_blue_circle else (220, 80, 0)  # blau für Sonderschilder, rot für Tempolimits
-        cv2.circle(frame, (cx, cy), radius, ring_color, -1)
-        cv2.circle(frame, (cx, cy), radius - ring_w, (255, 255, 255), -1)
-
-        txt  = str(limit)
-        fs   = (size / 200.0) * (0.8 if len(txt) >= 3 else 1.1)
-        th   = max(2, int(size / 80))
-        font = cv2.FONT_HERSHEY_DUPLEX
-        (tw, txth), _ = cv2.getTextSize(txt, font, fs, th)
-        cv2.putText(frame, txt,
-                    (cx - tw // 2, cy + txth // 2),
-                    font, fs, (20, 20, 20), th, cv2.LINE_AA)
+        bg, fg, brd = (40, 40, 55), (170, 170, 200), (65, 65, 80)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), bg, -1)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), brd, 1)
+    (tw, th), _ = cv2.getTextSize(label, _FONT, fs, 1)
+    tx = x1 + max(0, (x2 - x1 - tw) // 2)
+    ty = y1 + (y2 - y1 + th) // 2
+    cv2.putText(frame, label, (tx, ty), _FONT, fs, fg, 1, cv2.LINE_AA)
 
 
-def _draw_debounce_arc(frame: np.ndarray,
-                       debounce_progress: int, debounce_total: int,
-                       screen_w: int, screen_h: int) -> None:
-    """Zeichnet einen grünen Bogen um das Schild, der den Bestätigungs-Fortschritt zeigt."""
-    if debounce_total <= 1 or debounce_progress <= 0:
-        return
-    size   = int(screen_h * SIGN_DISPLAY_FRACTION)
-    size   = size - (size % 2)
-    cx     = screen_w // 2
-    cy     = screen_h // 2
-    radius = size // 2
-    arc_r  = radius + max(4, int(screen_h * 0.008))
-    arc_t  = max(3, int(screen_h * 0.005))
-    angle  = int(360 * min(debounce_progress, debounce_total) / debounce_total)
-    cv2.ellipse(frame, (cx, cy), (arc_r, arc_r),
-                -90, 0, angle, (0, 220, 120), arc_t)
+# ================================================================
+#  CONTROL PANEL  (CAM-Modus, untere 120 px)
+# ================================================================
+#
+#  Layout (y=200..319):
+#  ┌────────────────────────────┬────────────────────────────┐
+#  │ CONF  [-] 0.50 [+]         │ INFER [-] 4 [+]            │ y≈204
+#  │ DEB   [-]  4   [+]         │ MINPX [-] 20px [+]         │ y≈230
+#  │ [ROI: AUS/AN]              │ [1280x720 ▶]               │ y≈256
+#  │ Statuszeile                                              │ y≈285
+#  └─────────────────────────────────────────────────────────┘
+
+_CTRL_BG   = (15, 15, 20)
+_CTRL_LINE = (40, 40, 52)
+_LBL_COLOR = (110, 110, 135)
+_VAL_COLOR = (80,  180, 255)
+
+# Geometrie-Konstanten fuer das Control-Panel
+_CP_Y0    = CAM_VIEW_H      # 200
+_CP_ROW_H = 26              # Zeilenhoehe
+_CP_BTN_H = 20              # Button-Hoehe
+_CP_BTN_W = 18              # [-]/[+]-Breite
+_CP_LBL_W = 58              # Breite reserviert fuer Label
+_CP_VAL_W = 32              # Mindestbreite fuer Wert-Text
 
 
-def build_gui_frame(state: SpeedStateMachine,
-                    debounce_progress: int,
-                    debounce_total: int,
-                    screen_w: int,
-                    screen_h: int,
-                    fps_inf: float = 0.0,
-                    cpu_temp: float = 0.0) -> np.ndarray:
-    """
-    Erstellt den vollständigen Anzeigeframe für das GUI-Fenster.
-    - Schwarzer Hintergrund
-    - Zentriertes Schild-PNG (oder Platzhalter)
-    - Debounce-Bogen
-    - Kleine Statuszeile unten rechts
-    """
-    frame = np.zeros((screen_h, screen_w, 3), dtype=np.uint8)
+def _row_y(row: int) -> int:
+    return _CP_Y0 + 4 + row * _CP_ROW_H
 
+
+def _draw_adj(frame: np.ndarray, btn_name: str, label: str,
+              value_str: str, col: int, row: int) -> None:
+    """Zeichnet 'LABEL [-] WERT [+]' in einer Panel-Haelfte."""
+    cx = 0 if col == 0 else DISPLAY_W // 2
+    ry = _row_y(row)
+
+    cv2.putText(frame, label, (cx + 4, ry + 14),
+                _FONT, 0.33, _LBL_COLOR, 1, cv2.LINE_AA)
+
+    bx_minus = cx + _CP_LBL_W
+    _draw_btn(frame, btn_name + "_minus", "-",
+              bx_minus, ry, bx_minus + _CP_BTN_W, ry + _CP_BTN_H, fs=0.40)
+
+    val_x = bx_minus + _CP_BTN_W + 3
+    cv2.putText(frame, value_str, (val_x, ry + 14),
+                _FONT, 0.34, _VAL_COLOR, 1, cv2.LINE_AA)
+
+    (vw, _), _ = cv2.getTextSize(value_str, _FONT, 0.34, 1)
+    bx_plus = val_x + max(vw, _CP_VAL_W) + 3
+    _draw_btn(frame, btn_name + "_plus", "+",
+              bx_plus, ry, bx_plus + _CP_BTN_W, ry + _CP_BTN_H, fs=0.40)
+
+
+def _draw_control_panel(frame: np.ndarray, rt: dict) -> None:
+    # Hintergrund + Trennlinie
+    cv2.rectangle(frame, (0, _CP_Y0), (DISPLAY_W - 1, DISPLAY_H - 1), _CTRL_BG, -1)
+    cv2.line(frame, (0, _CP_Y0), (DISPLAY_W, _CP_Y0), _CTRL_LINE, 1)
+    cv2.line(frame, (DISPLAY_W // 2, _CP_Y0 + 2),
+             (DISPLAY_W // 2, DISPLAY_H - 22), _CTRL_LINE, 1)
+
+    # Zeile 0: CONF | INFER
+    _draw_adj(frame, "conf",  "CONF",  f"{rt['conf_thresh']:.2f}", 0, 0)
+    _draw_adj(frame, "infer", "INFER", str(rt["infer_every"]),      1, 0)
+
+    # Zeile 1: DEB | MINPX
+    _draw_adj(frame, "deb",   "DEB",   str(rt["debounce"]),         0, 1)
+    _draw_adj(frame, "minpx", "MINPX", f"{rt['min_sign_px']}px",   1, 1)
+
+    # Zeile 2: ROI-Toggle | Kameramodus-Wechsel
+    ry2     = _row_y(2)
+    roi_on  = rt["roi_crop"]
+    roi_lbl = "ROI:AN " if roi_on else "ROI:AUS"
+    _draw_btn(frame, "roi_toggle", roi_lbl,
+              4, ry2, 118, ry2 + _CP_BTN_H, active=roi_on, fs=0.34)
+
+    cur_mode = rt["camera_mode"]
+    cam_lbl  = cur_mode.split("@")[0]   # z.B. "1280x720" ohne "@60"
+    _draw_btn(frame, "cam_mode", cam_lbl,
+              DISPLAY_W // 2 + 4, ry2, DISPLAY_W - 4, ry2 + _CP_BTN_H, fs=0.31)
+
+    # Zeile 3: Statuszeile
+    fps_c    = rt.get("fps_cam", 0.0)
+    fps_i    = rt.get("fps_inf", 0.0)
+    temp     = rt.get("cpu_temp", 0.0)
+    n_det    = rt.get("n_det",    0)
+    hef      = rt.get("hef_name", "?")
+    temp_s   = f"{temp:.0f}C" if temp > 0 else "--"
+    stat_str = f"C:{fps_c:.0f} I:{fps_i:.0f} T:{temp_s} Det:{n_det}  {hef}"
+    cv2.putText(frame, stat_str, (4, DISPLAY_H - 5),
+                _FONT, 0.30, (80, 80, 100), 1, cv2.LINE_AA)
+
+
+# ================================================================
+#  TOGGLE-BUTTON  (immer sichtbar, oben rechts)
+# ================================================================
+
+def _draw_toggle_btn(frame: np.ndarray, display_mode: str) -> None:
+    label = "CAM>" if display_mode == "SIGN" else "<SGN"
+    _draw_btn(frame, "toggle_mode", label,
+              DISPLAY_W - 52, 2, DISPLAY_W - 2, 20, fs=0.33)
+
+
+# ================================================================
+#  GUI: SIGN-MODUS
+# ================================================================
+
+def _draw_sign_frame(state: SpeedStateMachine,
+                     debounce_progress: int, debounce_total: int,
+                     rt: dict) -> np.ndarray:
+    frame = np.zeros((DISPLAY_H, DISPLAY_W, 3), dtype=np.uint8)
     limit = state.current_limit
+
     if limit is None:
-        _draw_no_limit_screen(frame, screen_w, screen_h)
+        msg = "Erkennung laeuft ..."
+        (tw, th), _ = cv2.getTextSize(msg, _FONT, 0.55, 1)
+        cv2.putText(frame, msg,
+                    ((DISPLAY_W - tw) // 2, (DISPLAY_H + th) // 2),
+                    _FONT, 0.55, (70, 70, 70), 1, cv2.LINE_AA)
     else:
-        _draw_sign_png(frame, limit, screen_w, screen_h, state.use_blue_circle)
-        _draw_debounce_arc(frame, debounce_progress, debounce_total,
-                           screen_w, screen_h)
+        size = int(DISPLAY_H * SIGN_DISPLAY_FRACTION)
+        size = size - (size % 2)
+        cx   = DISPLAY_W // 2
+        cy   = DISPLAY_H // 2
+        x1   = cx - size // 2
+        y1   = cy - size // 2
 
-    # Statuszeile unten rechts (klein, dezent)
-    font  = cv2.FONT_HERSHEY_SIMPLEX
-    fs    = screen_h / 900.0
-    th    = max(1, int(screen_h / 600))
-    color = (70, 70, 70)
-    temp_str = f"{cpu_temp:.1f}C" if cpu_temp > 0 else "--"
-    status   = f"FPS:{fps_inf:.0f}  T:{temp_str}"
-    (tw, txth), _ = cv2.getTextSize(status, font, fs, th)
-    cv2.putText(frame, status,
-                (screen_w - tw - int(screen_w * 0.01),
-                 screen_h - int(screen_h * 0.015)),
-                font, fs, color, th, cv2.LINE_AA)
+        png = _load_sign_png_bgra(limit, size)
+        if png is not None:
+            if png.ndim == 3 and png.shape[2] == 4:
+                a  = png[:, :, 3:4].astype(np.float32) / 255.0
+                fg = png[:, :, :3].astype(np.float32)
+                bg = frame[y1:y1+size, x1:x1+size].astype(np.float32)
+                frame[y1:y1+size, x1:x1+size] = (a * fg + (1.0-a) * bg).astype(np.uint8)
+            else:
+                frame[y1:y1+size, x1:x1+size] = png[:, :, :3]
+        else:
+            radius   = size // 2
+            ring_w   = max(3, radius // 8)
+            ring_col = (0, 0, 200) if state.use_blue_circle else (200, 60, 0)
+            cv2.circle(frame, (cx, cy), radius, ring_col, -1)
+            cv2.circle(frame, (cx, cy), radius - ring_w, (255, 255, 255), -1)
+            txt = str(limit)
+            fs  = (size / 200.0) * (0.8 if len(txt) >= 3 else 1.1)
+            t   = max(2, int(size / 80))
+            (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_DUPLEX, fs, t)
+            cv2.putText(frame, txt, (cx - tw//2, cy + th//2),
+                        cv2.FONT_HERSHEY_DUPLEX, fs, (20, 20, 20), t, cv2.LINE_AA)
 
+        # Debounce-Bogen
+        if debounce_total > 1 and debounce_progress > 0:
+            radius = size // 2
+            arc_r  = radius + max(3, int(DISPLAY_H * 0.010))
+            arc_t  = max(2, int(DISPLAY_H * 0.006))
+            angle  = int(360 * min(debounce_progress, debounce_total) / debounce_total)
+            cv2.ellipse(frame, (cx, cy), (arc_r, arc_r),
+                        -90, 0, angle, (0, 220, 120), arc_t)
+
+    # Status unten rechts
+    fps_i  = rt.get("fps_inf", 0.0)
+    temp   = rt.get("cpu_temp", 0.0)
+    temp_s = f"{temp:.0f}C" if temp > 0 else "--"
+    stat   = f"FPS:{fps_i:.0f} T:{temp_s}"
+    (tw, _), _ = cv2.getTextSize(stat, _FONT, 0.30, 1)
+    cv2.putText(frame, stat, (DISPLAY_W - tw - 4, DISPLAY_H - 5),
+                _FONT, 0.30, (55, 55, 55), 1, cv2.LINE_AA)
+
+    _draw_toggle_btn(frame, "SIGN")
     return frame
+
+
+# ================================================================
+#  GUI: CAM-MODUS
+# ================================================================
+
+def _letterbox_frame(frame_bgr: np.ndarray, target_w: int, target_h: int):
+    """Letterbox-Resize; gibt (out, scale, x_off, y_off) zurueck."""
+    h, w  = frame_bgr.shape[:2]
+    scale = min(target_w / w, target_h / h)
+    nw, nh = int(w * scale), int(h * scale)
+    out   = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    x_off = (target_w - nw) // 2
+    y_off = (target_h - nh) // 2
+    out[y_off:y_off+nh, x_off:x_off+nw] = cv2.resize(
+        frame_bgr, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    return out, scale, x_off, y_off
+
+
+def _scale_detections(detections: list, scale: float,
+                      x_off: int, y_off: int) -> list:
+    """Skaliert BBox-Koordinaten von Kamera- auf Display-Raum."""
+    return [
+        {**d, "bbox": [
+            int(d["bbox"][0] * scale) + x_off,
+            int(d["bbox"][1] * scale) + y_off,
+            int(d["bbox"][2] * scale) + x_off,
+            int(d["bbox"][3] * scale) + y_off,
+        ]}
+        for d in detections
+    ]
+
+
+def _draw_detections_small(frame_bgr: np.ndarray, detections: list,
+                            primary_idx: Optional[int]) -> None:
+    """Zeichnet BBoxen + Konfidenz-Label fuer das kleine Kamerabild."""
+    for i, det in enumerate(detections):
+        x1, y1, x2, y2 = det["bbox"]
+        cls_id = det["class_id"]
+        color  = BBOX_COLORS.get(cls_id, (0, 255, 0))
+        t      = 2 if i == primary_idx else 1
+        cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), color, t)
+        label = f"{det['conf']:.0%}"
+        (tw, th), _ = cv2.getTextSize(label, _FONT, 0.30, 1)
+        ly = max(y1, th + 2)
+        cv2.rectangle(frame_bgr, (x1, ly - th - 2), (x1 + tw + 3, ly), color, -1)
+        cv2.putText(frame_bgr, label, (x1 + 2, ly - 1),
+                    _FONT, 0.30, (0, 0, 0), 1, cv2.LINE_AA)
+
+
+def _draw_cam_frame(cam_frame: np.ndarray,
+                    detections: list,
+                    primary: Optional[dict],
+                    state: SpeedStateMachine,
+                    debounce_progress: int,
+                    rt: dict) -> np.ndarray:
+    cam_disp, scale, x_off, y_off = _letterbox_frame(cam_frame, DISPLAY_W, CAM_VIEW_H)
+
+    # Detektionen skalieren + zeichnen
+    det_scaled = _scale_detections(detections, scale, x_off, y_off)
+    primary_idx: Optional[int] = None
+    if primary is not None:
+        for i, d in enumerate(detections):
+            if d is primary:
+                primary_idx = i
+                break
+    _draw_detections_small(cam_disp, det_scaled, primary_idx)
+
+    # Kleines Schild-Overlay (oben rechts, unterhalb Toggle-Button)
+    limit = state.current_limit
+    if limit is not None:
+        sign_sz = min(48, CAM_VIEW_H // 4)
+        sx1 = DISPLAY_W - sign_sz - 4
+        sy1 = 24
+        png = _load_sign_png_composited(limit, sign_sz)
+        if png is not None:
+            if isinstance(png, tuple):
+                afg, one_minus_a = png
+                bg = cam_disp[sy1:sy1+sign_sz, sx1:sx1+sign_sz].astype(np.float32)
+                cam_disp[sy1:sy1+sign_sz, sx1:sx1+sign_sz] = (
+                    afg + one_minus_a * bg).astype(np.uint8)
+            else:
+                cam_disp[sy1:sy1+sign_sz, sx1:sx1+sign_sz] = png
+        # Debounce-Bogen auf kleinem Schild
+        deb_total = rt.get("debounce", 4)
+        if deb_total > 1 and debounce_progress > 0:
+            cxs    = sx1 + sign_sz // 2
+            cys    = sy1 + sign_sz // 2
+            arc_r  = sign_sz // 2 + 2
+            angle  = int(360 * min(debounce_progress, deb_total) / deb_total)
+            cv2.ellipse(cam_disp, (cxs, cys), (arc_r, arc_r),
+                        -90, 0, angle, (0, 220, 120), 1)
+
+    # Gesamtframe aufbauen
+    output = np.zeros((DISPLAY_H, DISPLAY_W, 3), dtype=np.uint8)
+    output[:CAM_VIEW_H, :] = cam_disp
+    _draw_control_panel(output, rt)
+    _draw_toggle_btn(output, "CAM")
+    return output
+
+
+# ================================================================
+#  MOUSE CALLBACK & BUTTON-HANDLER
+# ================================================================
+
+def _on_mouse(event, x: int, y: int, flags, param) -> None:
+    if event != cv2.EVENT_LBUTTONDOWN:
+        return
+    # Screen-Koordinaten auf Content-Koordinaten zurueckskalieren
+    cx = int(x * DISPLAY_W / _screen_w)
+    cy = int(y * DISPLAY_H / _screen_h)
+    for name, (bx1, by1, bx2, by2) in list(_buttons.items()):
+        if bx1 <= cx <= bx2 and by1 <= cy <= by2:
+            _handle_button(name)
+            break
+
+
+def _handle_button(name: str) -> None:
+    with _runtime_lock:
+        rt = _runtime.copy()
+
+    if name == "toggle_mode":
+        set_runtime("display_mode", "CAM" if rt["display_mode"] == "SIGN" else "SIGN")
+
+    elif name == "conf_minus":
+        set_runtime("conf_thresh", max(0.10, round(rt["conf_thresh"] - 0.05, 2)))
+    elif name == "conf_plus":
+        set_runtime("conf_thresh", min(0.95, round(rt["conf_thresh"] + 0.05, 2)))
+
+    elif name == "infer_minus":
+        set_runtime("infer_every", max(1, rt["infer_every"] - 1))
+    elif name == "infer_plus":
+        set_runtime("infer_every", min(6, rt["infer_every"] + 1))
+
+    elif name == "deb_minus":
+        set_runtime("debounce", max(1, rt["debounce"] - 1))
+    elif name == "deb_plus":
+        set_runtime("debounce", min(8, rt["debounce"] + 1))
+
+    elif name == "minpx_minus":
+        set_runtime("min_sign_px", max(5, rt["min_sign_px"] - 5))
+    elif name == "minpx_plus":
+        set_runtime("min_sign_px", min(200, rt["min_sign_px"] + 5))
+
+    elif name == "roi_toggle":
+        set_runtime("roi_crop", not rt["roi_crop"])
+
+    elif name == "cam_mode":
+        modes  = list(CAMERA_MODES.keys())
+        cur    = rt["camera_mode"]
+        idx    = modes.index(cur) if cur in modes else 0
+        set_runtime("camera_mode", modes[(idx + 1) % len(modes)])
+        set_runtime("_mode_change", True)
 
 
 # ================================================================
@@ -775,9 +1026,8 @@ def build_gui_frame(state: SpeedStateMachine,
 # ================================================================
 
 def main() -> None:
-    print("Starte Speed Sign Detector (Deploy-Version) ...")
+    print("Starte Speed Sign Detector (Display-Version) ...")
 
-    # --- Hailo-NPU initialisieren ---
     print("  [1/3] Hailo-NPU ...", end="", flush=True)
     try:
         detector = SpeedSignDetector(HEF_PATH)
@@ -786,10 +1036,9 @@ def main() -> None:
         sys.exit(1)
     print(" OK")
 
-    # --- Picamera2 initialisieren ---
     print("  [2/3] Picamera2 ...", end="", flush=True)
     cam               = Picamera2()
-    cam_w, cam_h, fps = CAMERA_MODES.get(CAMERA_MODE, CAMERA_MODES["1280x720@60"])
+    cam_w, cam_h, fps = CAMERA_MODES[DEFAULT_MODE]
     frame_us          = int(1_000_000 / fps)
     cfg = cam.create_video_configuration(
         main={"format": "BGR888", "size": (cam_w, cam_h)},
@@ -802,71 +1051,86 @@ def main() -> None:
     time.sleep(2.0)
     print(" OK")
 
-    # --- CameraStream starten ---
     print("  [3/3] CameraStream ...", end="", flush=True)
     cam_stream = CameraStream(cam)
     cam_stream.start()
     print(" OK")
 
-    # --- Startup-Banner ---
     _params = _MODEL_PARAMS.get(detector.model_w, {})
     print(f"\n{'=' * 57}")
-    print(f"  Speed Sign Detector  \u00b7  Deploy-Version")
+    print(f"  Speed Sign Detector  \u00b7  Display-Version  (480x320)")
     print(f"  {'=' * 53}")
-    print(f"  Modell    : {HEF_PATH.name:<20}  [{detector.model_w}x{detector.model_h} px]")
-    print(f"  Konfidenz : {detector.conf_threshold}   every={detector.infer_every_n}   debounce={detector.debounce_count}")
-    print(f"  Kamera    : {cam_w}x{cam_h} @ {fps} fps  |  ROI-Crop: {ROI_CROP}")
+    print(f"  Modell  : {HEF_PATH.name:<22} [{detector.model_w}x{detector.model_h}px]")
+    print(f"  Kamera  : {cam_w}x{cam_h} @ {fps} fps  |  ROI-Crop: AUS")
+    print(f"  Display : {DISPLAY_W}x{DISPLAY_H}  Vollbild={FULLSCREEN}")
+    print(f"  Inf.    : conf={_params.get('conf_thresh', CONF_THRESHOLD)}"
+          f"  every={_params.get('infer_every', INFER_EVERY_N)}"
+          f"  debounce={_params.get('debounce', DEBOUNCE_COUNT)}"
+          f"  minpx={MIN_SIGN_PX}")
     print(f"{'=' * 57}\n")
 
-    # --- Bildschirmauflösung ermitteln (vor Fenster-Öffnung) ---
-    if FULLSCREEN:
-        screen_w, screen_h = _get_screen_resolution()
-        _print_line(f"[Display] Aufloesung: {screen_w}x{screen_h} (Vollbild)")
-    else:
-        screen_w, screen_h = WINDOW_W, WINDOW_H
+    # Echte Bildschirmaufloesung erkennen
+    global _screen_w, _screen_h
+    _screen_w, _screen_h = _detect_screen_size(DISPLAY_W, DISPLAY_H)
+    if _screen_w != DISPLAY_W or _screen_h != DISPLAY_H:
+        print(f"  Display : Inhalt {DISPLAY_W}x{DISPLAY_H} -> Bildschirm {_screen_w}x{_screen_h}")
 
-    # --- OpenCV-Fenster einrichten ---
-    WIN_NAME = "SpeedDisplay"
+    # OpenCV-Fenster
     cv2.namedWindow(WIN_NAME, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(WIN_NAME, screen_w, screen_h)
+    cv2.resizeWindow(WIN_NAME, _screen_w, _screen_h)
     if FULLSCREEN:
-        cv2.setWindowProperty(WIN_NAME,
-                              cv2.WND_PROP_FULLSCREEN,
-                              cv2.WINDOW_FULLSCREEN)
+        cv2.setWindowProperty(WIN_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    cv2.setMouseCallback(WIN_NAME, _on_mouse)
 
-    # --- Disclaimer anzeigen ---
     print(f"[Disclaimer] Zeige Hinweis fuer {DISCLAIMER_SECONDS} Sekunden ...")
-    _show_disclaimer(WIN_NAME, screen_w, screen_h)
+    _show_disclaimer(WIN_NAME)
 
-    # --- Haupt-Erkennungsschleife ---
-    print("[System] Erkennungsschleife gestartet. ESC zum Beenden.")
+    print("[System] Erkennungsschleife. TAB=Modus, ESC=Beenden.")
+
+    _set_cursor_visible(False)   # Startmodus ist SIGN -> kein Cursor
 
     state     = SpeedStateMachine()
     debouncer = TemporalDebouncer(buffer_size=5, required_hits=3)
 
-    inf_times: list             = []
-    fps_inf                     = 0.0
-    frame_count                 = 0
-    last_detections: list       = []
-    last_primary: Optional[dict]= None
-    debounce_progress           = 0
-    last_temp_t                 = 0.0
-    cpu_temp                    = 0.0
-    last_logged_limit: Optional[int] = None
+    cam_times: list = []
+    inf_times: list = []
+    fps_cam = fps_inf = 0.0
+    frame_count                          = 0
+    prev_disp_mode: str                  = "SIGN"
+    last_detections: list                = []
+    last_primary: Optional[dict]         = None
+    last_inf_frame: Optional[np.ndarray] = None
+    debounce_progress                    = 0
+    last_temp_t                          = 0.0
+    last_logged_limit: Optional[int]     = None
 
     try:
         while True:
             t0 = time.perf_counter()
 
-            # CPU-Temperatur alle 2 Sekunden
             if t0 - last_temp_t >= 2.0:
-                cpu_temp    = get_cpu_temp()
+                set_runtime("cpu_temp", get_cpu_temp())
                 last_temp_t = t0
 
-            # Frame holen (nicht-blockierend)
-            frame_bgr = cam_stream.read()
+            infer_every = get_runtime("infer_every")
+            deb_count   = get_runtime("debounce")
+            roi_active  = get_runtime("roi_crop")
+            min_sign_px = get_runtime("min_sign_px")
 
-            # Thread-Tod erkennen und automatisch neu starten
+            # Kamera-Modusaenderung
+            if get_runtime("_mode_change"):
+                set_runtime("_mode_change", False)
+                new_mode = get_runtime("camera_mode")
+                cam_stream.stop()
+                cam_w, cam_h, fps = restart_camera(cam, new_mode)
+                last_detections   = []
+                last_primary      = None
+                last_inf_frame    = None
+                debouncer.reset()
+                cam_stream = CameraStream(cam)
+                cam_stream.start()
+
+            frame_bgr = cam_stream.read()
             if frame_bgr is None:
                 if not cam_stream._thread.is_alive():
                     _print_line("[WARN] CameraStream-Thread tot -- starte neu ...")
@@ -878,21 +1142,28 @@ def main() -> None:
 
             frame_count += 1
 
-            if debouncer.buffer_size != detector.debounce_count:
-                debouncer.resize(detector.debounce_count)
+            if debouncer.buffer_size != deb_count:
+                debouncer.resize(deb_count)
 
             # Inferenz (jeden N-ten Frame)
-            if frame_count % detector.infer_every_n == 0:
-                t_inf = time.perf_counter()
+            if frame_count % infer_every == 0:
+                t_inf          = time.perf_counter()
+                last_inf_frame = frame_bgr
 
-                img_rgb, scale, pad_x, pad_y, roi_offset_y = detector.preprocess(
-                    frame_bgr, cam_w, cam_h, apply_roi_crop=ROI_CROP)
-                result          = detector.run(img_rgb)
-                last_detections = detector.postprocess(
-                    result, cam_w, cam_h, scale, pad_x, pad_y, roi_offset_y)
-                last_primary    = select_primary_detection(
-                    last_detections, cam_w, cam_h)
+                img_rgb, scale, pad_x, pad_y, roi_off_y = detector.preprocess(
+                    last_inf_frame, cam_w, cam_h, apply_roi_crop=roi_active)
+                result   = detector.run(img_rgb)
+                raw_dets = detector.postprocess(
+                    result, cam_w, cam_h, scale, pad_x, pad_y, roi_off_y)
 
+                # Min-Groesse-Filter (in Kamera-Pixel)
+                last_detections = [
+                    d for d in raw_dets
+                    if (d["bbox"][2] - d["bbox"][0]) >= min_sign_px
+                    and (d["bbox"][3] - d["bbox"][1]) >= min_sign_px
+                ]
+
+                last_primary      = select_primary_detection(last_detections, cam_w, cam_h)
                 cid               = last_primary["class_id"] if last_primary else None
                 confirmed         = debouncer.update(cid)
                 debounce_progress = debouncer.get_progress(cid)
@@ -900,39 +1171,77 @@ def main() -> None:
                 if confirmed is not None:
                     state.update(confirmed)
                     if state.current_limit != last_logged_limit:
-                        name = SIGN_CLASSES.get(confirmed, {}).get("name", "?")
-                        _print_line(f"[SCHILD] {name} -> {state.current_limit} km/h")
+                        sname = SIGN_CLASSES.get(confirmed, {}).get("name", "?")
+                        _print_line(f"[SCHILD] {sname} -> {state.current_limit} km/h")
                         last_logged_limit = state.current_limit
 
                 inf_times.append(time.perf_counter() - t_inf)
                 if len(inf_times) > 30:
                     inf_times.pop(0)
                 fps_inf = 1.0 / (sum(inf_times) / len(inf_times))
+                set_runtime("fps_inf", fps_inf)
+                set_runtime("n_det",   len(last_detections))
 
-            # GUI-Frame aufbauen und anzeigen
-            gui_frame = build_gui_frame(
-                state, debounce_progress, detector.debounce_count,
-                screen_w, screen_h, fps_inf, cpu_temp
-            )
-            cv2.imshow(WIN_NAME, gui_frame)
+            # FPS messen
+            cam_times.append(time.perf_counter() - t0)
+            if len(cam_times) > 60:
+                cam_times.pop(0)
+            fps_cam = 1.0 / (sum(cam_times) / len(cam_times))
+            set_runtime("fps_cam", fps_cam)
 
-            # ESC beendet die Schleife
-            if cv2.waitKey(1) == 27:
+            # Display-Frame aufbauen
+            with _runtime_lock:
+                rt_snap = {k: v for k, v in _runtime.items() if not k.startswith("_")}
+
+            disp_mode = rt_snap["display_mode"]
+            if disp_mode != prev_disp_mode:
+                _set_cursor_visible(disp_mode == "CAM")
+                prev_disp_mode = disp_mode
+            # Kopie des letzten Inferenz-Frames (verhindert Annotations-Akkumulation)
+            enc_frame = last_inf_frame.copy() if last_inf_frame is not None else frame_bgr
+
+            if disp_mode == "CAM":
+                output = _draw_cam_frame(
+                    enc_frame, last_detections, last_primary,
+                    state, debounce_progress, rt_snap)
+            else:
+                output = _draw_sign_frame(
+                    state, debounce_progress, deb_count, rt_snap)
+
+            cv2.imshow(WIN_NAME, _fit_to_screen(output))
+
+            # Tastatur
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:    # ESC -> Beenden
                 break
+            elif key == 9:   # TAB -> Modus wechseln
+                _handle_button("toggle_mode")
+            elif disp_mode == "CAM":
+                if   key == ord('q'): _handle_button("conf_minus")
+                elif key == ord('w'): _handle_button("conf_plus")
+                elif key == ord('a'): _handle_button("infer_minus")
+                elif key == ord('s'): _handle_button("infer_plus")
+                elif key == ord('y'): _handle_button("deb_minus")
+                elif key == ord('x'): _handle_button("deb_plus")
+                elif key == ord('u'): _handle_button("minpx_minus")
+                elif key == ord('i'): _handle_button("minpx_plus")
+                elif key == ord('r'): _handle_button("roi_toggle")
+                elif key == ord('k'): _handle_button("cam_mode")
 
             # Konsolenstatus
             _limit = state.current_limit
-            _line  = (f"FPS-Inf: {fps_inf:.0f}"
-                      f"  |  Temp: {cpu_temp:.1f}°C"
-                      f"  |  Schild: {f'{_limit} km/h' if _limit else '---'}"
-                      f"  |  Det: {len(last_detections)}")
+            _line  = (f"FPS: {fps_cam:.0f}/{fps_inf:.0f}"
+                      f"  Temp: {get_runtime('cpu_temp'):.0f}C"
+                      f"  Schild: {f'{_limit} km/h' if _limit else '---'}"
+                      f"  Det: {len(last_detections)}"
+                      f"  [{disp_mode}]")
             print(f"\r\033[2K{_line}", end="", flush=True)
 
     except KeyboardInterrupt:
         pass
 
     finally:
-        print(f"\r{'':<90}", flush=True)
+        print(f"\r{'':<{_STATUS_LINE_LEN}}", flush=True)
         print("[System] Beende ...")
         cv2.destroyAllWindows()
         try:

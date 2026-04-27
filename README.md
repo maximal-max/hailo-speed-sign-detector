@@ -45,16 +45,16 @@ Das Projekt ist bewusst auf zwei Plattformen aufgeteilt. **Nur zwei Dateien lauf
 | Modell auf dem PC testen | `PC_application.py` | Windows |
 | Trainingsläufe vergleichen (Terminal) | `compare_models_advanced.py` | Windows |
 | Trainingsläufe vergleichen (Grafik) | `compare_models_visual.py` | Windows |
-| **Inferenz (Entwicklung)** | **`RPI_debug.py`** | **Raspberry Pi** |
-| **Inferenz (Produktion)** | **`RPI_deploy.py`** | **Raspberry Pi** |
+| **Inferenz (Entwicklung, Web-UI)** | **`RPI_debug.py`** | **Raspberry Pi** |
+| **Inferenz (Produktion, Display)** | **`RPI_deploy.py`** | **Raspberry Pi** |
 
 ### Übergabe PC → Raspberry Pi
 
 Nach dem Training und der Hailo-Kompilierung müssen folgende Dateien auf den Pi übertragen werden:
 
 ```
-models/active_hef/<modell>.hef    ← kompiliertes Hailo-Modell
-assets/                           ← Schild-PNGs für die Anzeige
+models/active_hef/<modell>.hef                  ← kompiliertes Hailo-Modell
+datasets/application_images_dataset/<n>.png     ← Schild-PNGs für die Anzeige (0.png – 19.png)
 ```
 
 Alle anderen Dateien (Datensatz, Trainings-Checkpoints, ONNX-Modell, Kalibrierungsbilder) verbleiben auf dem Windows-PC.
@@ -80,7 +80,7 @@ hailo-speed-sign-detector/
 │
 │  ── Raspberry Pi (Inferenz) ────────────────────────────────
 ├── RPI_debug.py                    ← Echtzeit-Inferenz + Web-UI (Entwicklung)
-└── RPI_deploy.py                   ← Vollbild-GUI, kein Webserver (Produktion)
+└── RPI_deploy.py                   ← Vollbild-Display-App, kein Webserver (Produktion)
 ```
 
 ---
@@ -179,13 +179,13 @@ Lädt das trainierte `best.pt`-Modell und zeigt eine Echtzeit-Inferenz auf Webca
 
 Web-UI: `http://<PI-IP>:8080`
 
-**Deploy-Modus** (Produktion, Vollbild-GUI ohne Webserver):
+**Deploy-Modus** (Produktion, Vollbild-Display ohne Webserver):
 
 ```bash
 /usr/bin/python3 RPI_deploy.py
 ```
 
-Zeigt nur das erkannte Temposchild als PNG im Vollbild — kein Kamerabild, keine Bounding Boxes, kein HTTP-Server. Startet mit einem 10-Sekunden-Disclaimer.
+Startet mit einem 10-Sekunden-Disclaimer, dann Vollbild-Anzeige des erkannten Temposchilds. Per TAB oder Toggle-Button oben rechts in den CAM-Modus wechseln (Kamerabild + Einstellungs-Panel).
 
 ---
 
@@ -295,29 +295,50 @@ Einzelne verlorene Frames (Hailo-Flackern) werden toleriert. Bei `buffer_size=5`
 
 ## Deploy-Anwendung (`RPI_deploy.py`)
 
-Produktionsversion für den Fahrzeugeinsatz — kein Webserver, kein Kamerabild, kein Netzwerk-Stream.
+Produktionsversion für den Fahrzeugeinsatz — kein Webserver, kein Netzwerk-Stream. Kombiniert Vollbild-Schildanzeige (SIGN-Modus) und Live-Debug-Ansicht (CAM-Modus) in einer einzigen Anwendung.
 
-### Konzept
+### Anzeigemodi
 
-Das Skript zeigt ausschließlich das erkannte Temposchild als PNG im Vollbild an. Kein Kamerabild, keine Bounding Boxes, keine Debug-Overlays. Gedacht für den montierten Betrieb an einem Display im Fahrzeug.
+| Modus | Inhalt | Mauszeiger |
+|---|---|---|
+| **SIGN** | Erkanntes Temposchild als PNG, schwarzer Hintergrund, Debounce-Bogen | versteckt |
+| **CAM** | Kamerabild mit Bounding Boxes + Einstellungs-Panel | sichtbar |
+
+Umschalten: **TAB**-Taste oder Toggle-Button oben rechts. Im SIGN-Modus wird der Mauszeiger automatisch ausgeblendet (Xlib / xdotool).
+
+### Einstellungen im CAM-Modus
+
+Alle Parameter lassen sich per Mausklick **oder Tastatur** anpassen — keine Neustart nötig:
+
+| Taste | Maus | Parameter | Wertebereich |
+|---|---|---|---|
+| Q / W | [-] [+] | Konfidenz | 0.10 – 0.95 (Schritt 0.05) |
+| A / S | [-] [+] | Infer-N | 1 – 6 |
+| Y / X | [-] [+] | Debounce | 1 – 8 |
+| U / I | [-] [+] | Min. Schildgröße | 5 – 200 px (Schritt 5) |
+| R | Button | ROI-Crop | ein / aus |
+| K | Button | Kameramodus | 1280x720@60 ↔ 800x600@90 |
+
+### Bildschirmauflösung
+
+Die Auflösung wird beim Start automatisch über `fbset` (kein X11 nötig) oder `xrandr` erkannt. Der Content-Frame (intern 480×320) wird per `cv2.resize` auf die echte Bildschirmgröße skaliert — kein manuelles Anpassen nötig.
 
 ### Konfiguration (am Dateianfang)
 
 ```python
-CONFIDENCE_THRESHOLD = 0.45   # Mindest-Konfidenz
-CAMERA_MODE    = "1280x720@60"
-ROI_CROP       = False         # untere 30% abschneiden (Fahrzeug-Montage)
-INFER_EVERY_N  = 2             # jeden N-ten Frame inferieren
-DEBOUNCE_COUNT = 3             # Treffer bis zur Bestätigung
-FULLSCREEN     = True          # False = Fenster 800×480
-DISCLAIMER_SECONDS = 10        # Dauer des Start-Disclaimers
+DISPLAY_W          = 480          # Content-Breite (intern, unabhaengig vom HDMI-Signal)
+DISPLAY_H          = 320          # Content-Hoehe
+CAM_VIEW_H         = 200          # Kamerabild-Hoehe im CAM-Modus
+FULLSCREEN         = True
+SIGN_DISPLAY_FRACTION = 0.72      # Anteil der Hoehe fuer das Schild-PNG
+DISCLAIMER_SECONDS = 10
 ```
 
-Das Modell wird ebenfalls automatisch aus `models/active_hef/` geladen (identische Logik wie `RPI_debug.py`).
+Inferenz-Defaults werden automatisch aus dem geladenen Modell abgeleitet (`_MODEL_PARAMS` nach Modellbreite 512 / 640 / 800 px). Das Modell wird aus `models/active_hef/` geladen (identisch zu `RPI_debug.py`).
 
 ### Start-Disclaimer
 
-Beim Start erscheint für 10 Sekunden ein Hinweistext mit Countdown-Balken. Erst danach beginnt die Echtzeit-Erkennung.
+Beim Start erscheint für 10 Sekunden ein Hinweistext mit animiertem Countdown-Balken. Erst danach beginnt die Echtzeit-Erkennung.
 
 ---
 
